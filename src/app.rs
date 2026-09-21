@@ -20,10 +20,12 @@ use crate::seed;
 use crate::tablet::{PenSnapshot, TabletBridge};
 use crate::undo::UndoStack;
 
-const DOS_W: f32 = 232.0;
-const DOS_H: f32 = 292.0;
-const DOS_PAD: f32 = 28.0;
-const PAPER_PEEK: f32 = 118.0;
+const DOS_W: f32 = 168.0;
+const DOS_H: f32 = 148.0;
+const DOS_PAD: f32 = 14.0;
+const PAPER_PEEK: f32 = 56.0;
+const TITLE_BAND: f32 = 36.0;
+const ICON_ROW: f32 = 30.0;
 
 #[derive(Clone)]
 enum Scene {
@@ -393,11 +395,7 @@ impl eframe::App for CahierApp {
                 self.toast(format!("thème {}", label.to_lowercase()), t);
             }
         }
-        if matches!(self.scene, Scene::Desk) || self.tablet.wants_repaint() {
-            ctx.request_repaint();
-        } else {
-            ctx.request_repaint_after(std::time::Duration::from_millis(400));
-        }
+        let wants_pen = self.tablet.wants_repaint();
         let t = ctx.input(|i| i.time);
         self.shortcuts(ctx);
         self.ingest_touch_pressure(ctx);
@@ -416,8 +414,17 @@ impl eframe::App for CahierApp {
                 self.toast = None;
             }
         }
-        if self.live.is_some() || !self.lasso.is_empty() || self.dirty {
+        let busy = self.live.is_some()
+            || !self.lasso.is_empty()
+            || self.dirty
+            || !self.sel.is_empty()
+            || self.dock_float.is_some()
+            || wants_pen
+            || self.toast.is_some();
+        if busy {
             ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(400));
         }
     }
 
@@ -832,8 +839,6 @@ impl CahierApp {
                             .color(self.look.muted),
                     );
                 });
-                ui.add_space(18.0);
-                self.fiche_pupitre(ui);
                 ui.add_space(22.0);
 
                 let query = match &self.scene {
@@ -923,127 +928,137 @@ impl CahierApp {
                     self.new_note();
                 }
             });
+
+        let fiche_ouverte = !self.lib.index.fiche_pliee;
+        Area::new(Id::new("shelf-tuto-btn"))
+            .anchor(Align2::RIGHT_TOP, vec2(-28.0, -28.0))
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                if self
+                    .round_well(ui, 44.0, fiche_ouverte, paint_help)
+                    .on_hover_text(if fiche_ouverte {
+                        "fermer le tuto"
+                    } else {
+                        "tuto pupitre  ·  / ou F1"
+                    })
+                    .clicked()
+                {
+                    self.lib.index.fiche_pliee = !self.lib.index.fiche_pliee;
+                    self.lib.save_index();
+                }
+            });
+        if !self.lib.index.fiche_pliee {
+            Area::new(Id::new("shelf-tuto-fiche"))
+                .anchor(Align2::RIGHT_TOP, vec2(-28.0, -84.0))
+                .order(Order::Foreground)
+                .show(ctx, |ui| {
+                    self.fiche_pupitre(ui);
+                });
+        }
     }
 
     fn fiche_pupitre(&mut self, ui: &mut Ui) {
-        let folded = self.lib.index.fiche_pliee;
-        let max_w = ui.available_width() - 72.0;
-        let w = max_w.clamp(280.0, 640.0);
-        let h = if folded { 46.0 } else { 172.0 };
-        ui.horizontal(|ui| {
-            ui.add_space(36.0);
-            let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
-            let p = ui.painter_at(rect);
-            let ink = self.look.ink;
-            let mute = ink.gamma_multiply(0.52);
-            p.rect_filled(
-                rect.translate(vec2(3.0, 4.0)),
-                CornerRadius::same(4),
-                self.look.shadow,
+        let w = 440.0_f32.min(ui.ctx().screen_rect().width() - 72.0).max(280.0);
+        let h = 172.0;
+        let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+        let p = ui.painter_at(rect);
+        let ink = self.look.ink;
+        let mute = ink.gamma_multiply(0.52);
+        p.rect_filled(
+            rect.translate(vec2(3.0, 4.0)),
+            CornerRadius::same(4),
+            self.look.shadow,
+        );
+        p.rect_filled(rect, CornerRadius::same(4), self.look.paper);
+        p.rect_stroke(
+            rect,
+            CornerRadius::same(4),
+            Stroke::new(1.0_f32, ink.gamma_multiply(0.18)),
+            StrokeKind::Inside,
+        );
+        for i in 0..3 {
+            let t = i as f32 / 2.0;
+            let y = rect.min.y + 14.0 + t * (h - 28.0);
+            let c = pos2(rect.min.x + 13.0, y);
+            p.circle_filled(c, 3.4, self.look.punch);
+            p.circle_stroke(c, 3.4, Stroke::new(1.0_f32, ink.gamma_multiply(0.28)));
+        }
+        p.line_segment(
+            [
+                pos2(rect.min.x + 24.0, rect.min.y + 8.0),
+                pos2(rect.min.x + 24.0, rect.max.y - 8.0),
+            ],
+            Stroke::new(1.0_f32, self.look.paper_rule_strong),
+        );
+        p.text(
+            pos2(rect.min.x + 36.0, rect.min.y + 10.0),
+            Align2::LEFT_TOP,
+            "sur le pupitre",
+            self.look.serif(18.0),
+            ink,
+        );
+        let left = [
+            "stylet     écrit",
+            "doigt      pousse la feuille",
+            "2 doigts   panorama  ·  tap = annuler",
+            "pincement  zoom",
+        ];
+        let right = [
+            "bouton 1      gomme (tenir)",
+            "clic en l'air plume ↔ gomme",
+            "bouton 2      lasso (tenir)",
+            "gomme trousse coller / recoller",
+        ];
+        let y0 = rect.min.y + 38.0;
+        for (i, line) in left.iter().enumerate() {
+            p.text(
+                pos2(rect.min.x + 36.0, y0 + i as f32 * 18.0),
+                Align2::LEFT_TOP,
+                *line,
+                self.look.mono(12.0),
+                mute,
             );
-            p.rect_filled(rect, CornerRadius::same(4), self.look.paper);
+        }
+        let col2 = (rect.min.x + 36.0 + (w - 48.0) * 0.50).min(rect.max.x - 220.0);
+        if col2 > rect.min.x + 200.0 {
+            for (i, line) in right.iter().enumerate() {
+                p.text(
+                    pos2(col2, y0 + i as f32 * 18.0),
+                    Align2::LEFT_TOP,
+                    *line,
+                    self.look.mono(12.0),
+                    mute,
+                );
+            }
+        }
+        p.text(
+            pos2(rect.min.x + 36.0, rect.max.y - 14.0),
+            Align2::LEFT_CENTER,
+            "appui long gomme : trait ↔ zone   ·   puits main / chiffon   ·   e plume ↔ gomme",
+            self.look.mono(11.0),
+            mute.gamma_multiply(0.85),
+        );
+        if resp.hovered() {
             p.rect_stroke(
                 rect,
                 CornerRadius::same(4),
-                Stroke::new(1.0_f32, ink.gamma_multiply(0.18)),
-                StrokeKind::Inside,
+                Stroke::new(1.4_f32, self.look.accent),
+                StrokeKind::Outside,
             );
-            let holes = if folded { 1 } else { 3 };
-            for i in 0..holes {
-                let t = if holes == 1 {
-                    0.5
-                } else {
-                    i as f32 / (holes - 1) as f32
-                };
-                let y = rect.min.y + 14.0 + t * (h - 28.0);
-                let c = pos2(rect.min.x + 13.0, y);
-                p.circle_filled(c, 3.4, self.look.punch);
-                p.circle_stroke(c, 3.4, Stroke::new(1.0_f32, ink.gamma_multiply(0.28)));
-            }
-            p.line_segment(
-                [
-                    pos2(rect.min.x + 24.0, rect.min.y + 8.0),
-                    pos2(rect.min.x + 24.0, rect.max.y - 8.0),
-                ],
-                Stroke::new(1.0_f32, self.look.paper_rule_strong),
-            );
-            if folded {
-                p.text(
-                    pos2(rect.min.x + 36.0, rect.center().y),
-                    Align2::LEFT_CENTER,
-                    "sur le pupitre  ·  stylet écrit · doigt pousse · tap 2 doigts = annuler",
-                    self.look.serif(15.0),
-                    ink,
-                );
-            } else {
-                p.text(
-                    pos2(rect.min.x + 36.0, rect.min.y + 10.0),
-                    Align2::LEFT_TOP,
-                    "sur le pupitre",
-                    self.look.serif(18.0),
-                    ink,
-                );
-                let left = [
-                    "stylet     écrit",
-                    "doigt      pousse la feuille",
-                    "2 doigts   panorama  ·  tap = annuler",
-                    "pincement  zoom",
-                ];
-                let right = [
-                    "bouton 1      gomme (tenir)",
-                    "clic en l'air plume ↔ gomme",
-                    "bouton 2      lasso (tenir)",
-                    "gomme trousse coller / recoller",
-                ];
-                let y0 = rect.min.y + 38.0;
-                for (i, line) in left.iter().enumerate() {
-                    p.text(
-                        pos2(rect.min.x + 36.0, y0 + i as f32 * 18.0),
-                        Align2::LEFT_TOP,
-                        *line,
-                        self.look.mono(12.0),
-                        mute,
-                    );
-                }
-                let col2 = (rect.min.x + 36.0 + (w - 48.0) * 0.50).min(rect.max.x - 220.0);
-                if col2 > rect.min.x + 200.0 {
-                    for (i, line) in right.iter().enumerate() {
-                        p.text(
-                            pos2(col2, y0 + i as f32 * 18.0),
-                            Align2::LEFT_TOP,
-                            *line,
-                            self.look.mono(12.0),
-                            mute,
-                        );
-                    }
-                }
-                p.text(
-                    pos2(rect.min.x + 36.0, rect.max.y - 14.0),
-                    Align2::LEFT_CENTER,
-                    "appui long gomme : trait ↔ zone   ·   puits main / chiffon   ·   e plume ↔ gomme",
-                    self.look.mono(11.0),
-                    mute.gamma_multiply(0.85),
-                );
-            }
-            if resp.hovered() {
-                p.rect_stroke(
-                    rect,
-                    CornerRadius::same(4),
-                    Stroke::new(1.4_f32, self.look.accent),
-                    StrokeKind::Outside,
-                );
-            }
-            if resp.clicked() {
-                self.lib.index.fiche_pliee = !folded;
-                self.lib.save_index();
-            }
-            resp.on_hover_cursor(CursorIcon::PointingHand)
-                .on_hover_text(if folded { "déplier" } else { "replier" });
-        });
+        }
+        if resp.clicked() {
+            self.lib.index.fiche_pliee = true;
+            self.lib.save_index();
+        }
+        resp.on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("replier");
     }
 
     fn cahier_dos(&mut self, ui: &mut Ui, meta: &crate::library::NoteMeta) -> Option<DosAct> {
-        let slot = vec2(DOS_W + DOS_PAD * 2.0, DOS_H + DOS_PAD * 2.0 + PAPER_PEEK);
+        let slot = vec2(
+            DOS_W + DOS_PAD * 2.0,
+            TITLE_BAND + DOS_H + DOS_PAD * 2.0 + PAPER_PEEK + ICON_ROW,
+        );
         let (slot_rect, resp) = ui.allocate_exact_size(slot, Sense::click());
         let id = Id::new("cahier-dos").with(meta.id);
         let pointer = ui.input(|i| i.pointer.hover_pos());
@@ -1052,274 +1067,175 @@ impl CahierApp {
             ui.ctx().request_repaint();
         }
 
-        let lift_t = ui.ctx().animate_bool_with_time(id.with("peek"), over, 0.42);
+        let lift_t = ui.ctx().animate_bool_with_time(id.with("peek"), over, 0.36);
         let e = lift_t * lift_t * (3.0 - 2.0 * lift_t);
         let cloth = self.look.cloth_at(meta.cover);
-        let cloth_deep = shade_rgb(cloth, 0.72);
-        let cloth_lit = shade_rgb(cloth, 1.12);
+        let cloth_deep = shade_rgb(cloth, 0.70);
+        let cloth_edge = shade_rgb(cloth, 0.48);
         let paper = self.look.paper;
-        let ink = self.look.ink;
 
-        // Folder sits in the lower part of the slot; paper rises above.
         let face = Rect::from_min_size(
             pos2(
                 slot_rect.center().x - DOS_W * 0.5,
-                slot_rect.max.y - DOS_PAD - DOS_H,
+                slot_rect.min.y + DOS_PAD + TITLE_BAND + PAPER_PEEK * 0.15,
             ),
             vec2(DOS_W, DOS_H),
         );
         let painter = if e > 0.02 {
             ui.ctx()
                 .layer_painter(LayerId::new(Order::Foreground, id))
-                .with_clip_rect(slot_rect.expand(8.0).intersect(ui.clip_rect().expand(6.0)))
+                .with_clip_rect(slot_rect.expand(4.0).intersect(ui.clip_rect().expand(4.0)))
         } else {
             ui.painter_at(slot_rect)
         };
 
-        // Soft desk shadow
-        let sh = face.translate(vec2(4.0 + 2.0 * e, 7.0 + 4.0 * e)).expand(2.0 * e);
+        // Title above the leather
+        let title_pos = pos2(face.min.x + 2.0, face.min.y - 22.0);
+        painter.text(
+            title_pos,
+            Align2::LEFT_BOTTOM,
+            &meta.title,
+            self.look.serif(16.0),
+            self.look.fg,
+        );
+        let date = meta.updated.format("%d %b").to_string().to_lowercase();
+        painter.text(
+            pos2(face.max.x - 2.0, face.min.y - 8.0),
+            Align2::RIGHT_BOTTOM,
+            date,
+            self.look.mono(10.0),
+            self.look.fg_dim,
+        );
+        if meta.pinned {
+            painter.circle_filled(
+                pos2(face.max.x - 6.0, face.min.y - 28.0),
+                3.2,
+                self.look.accent,
+            );
+        }
+
         painter.rect_filled(
-            sh,
-            CornerRadius::same(18),
-            self.look.shadow.gamma_multiply(0.55 + 0.25 * e),
+            face.translate(vec2(2.5, 4.0 + 2.0 * e)),
+            CornerRadius::same(12),
+            self.look.shadow.gamma_multiply(0.45 + 0.2 * e),
         );
 
+        // Back panel (slightly taller)
         let back = Rect::from_min_max(
-            pos2(face.min.x - 3.0, face.min.y - 10.0),
-            pos2(face.max.x + 3.0, face.max.y),
+            pos2(face.min.x - 1.5, face.min.y - 6.0),
+            pos2(face.max.x + 1.5, face.max.y),
         );
-        let r_back = CornerRadius {
-            nw: 10,
-            ne: 18,
-            sw: 16,
-            se: 16,
-        };
-        painter.rect_filled(back, r_back, cloth_deep);
-        painter.rect_stroke(
-            back,
-            r_back,
-            Stroke::new(1.0_f32, shade_rgb(cloth, 0.45)),
-            StrokeKind::Inside,
-        );
+        painter.rect_filled(back, CornerRadius::same(11), cloth_deep);
 
-        // Sliding sheet (between back and front)
-        let lip_y = face.min.y + 28.0;
+        // Sliding sheet
+        let lip_y = face.min.y + 12.0;
         let peek = e * PAPER_PEEK;
         let sheet = Rect::from_min_max(
-            pos2(face.min.x + 18.0, lip_y - peek - 4.0),
-            pos2(face.max.x - 14.0, lip_y + 72.0),
+            pos2(face.min.x + 16.0, lip_y - peek),
+            pos2(face.max.x - 14.0, lip_y + 36.0),
         );
-        {
-            painter.rect_filled(
-                sheet.translate(vec2(2.0, 3.0)),
-                CornerRadius::same(4),
-                self.look.shadow.gamma_multiply(0.28 + 0.2 * e),
-            );
-            painter.rect_filled(sheet, CornerRadius::same(4), paper);
-            painter.rect_stroke(
-                sheet,
-                CornerRadius::same(4),
-                Stroke::new(1.0_f32, ink.gamma_multiply(0.16)),
-                StrokeKind::Inside,
-            );
-            let mut y = sheet.min.y + 20.0;
-            while y < sheet.max.y - 10.0 {
-                if y < lip_y - 2.0 || e > 0.05 {
-                    painter.line_segment(
-                        [pos2(sheet.min.x + 10.0, y), pos2(sheet.max.x - 10.0, y)],
-                        Stroke::new(1.0_f32, self.look.paper_rule),
-                    );
-                }
-                y += 14.0;
-            }
-            if e > 0.08 {
+        painter.rect_filled(sheet, CornerRadius::same(2), paper);
+        if e > 0.12 {
+            let mut y = sheet.min.y + 12.0;
+            while y < lip_y - 3.0 {
                 painter.line_segment(
-                    [
-                        pos2(sheet.min.x + 18.0, sheet.min.y + 8.0),
-                        pos2(sheet.min.x + 18.0, (lip_y - 6.0).max(sheet.min.y + 12.0)),
-                    ],
-                    Stroke::new(1.2_f32, self.look.accent.gamma_multiply(0.4 + 0.35 * e)),
+                    [pos2(sheet.min.x + 7.0, y), pos2(sheet.max.x - 7.0, y)],
+                    Stroke::new(1.0_f32, self.look.paper_rule),
                 );
+                y += 11.0;
             }
         }
 
-        // Front pocket (shorter top = opening)
+        // Leather pocket — most of the silhouette
         let front = Rect::from_min_max(pos2(face.min.x, lip_y), face.max);
-        let r_front = CornerRadius {
-            nw: 6,
-            ne: 6,
-            sw: 18,
-            se: 18,
+        let r = CornerRadius {
+            nw: 4,
+            ne: 4,
+            sw: 12,
+            se: 12,
         };
-        // cloth grain: base + subtle top highlight band
-        painter.rect_filled(front, r_front, cloth);
-        let band = Rect::from_min_max(
-            front.min,
-            pos2(front.max.x, front.min.y + 18.0),
-        );
+        painter.rect_filled(front, r, cloth);
+        // soft top shade on the pocket lip
         painter.rect_filled(
-            band,
+            Rect::from_min_max(front.min, pos2(front.max.x, front.min.y + 10.0)),
+            CornerRadius {
+                nw: 4,
+                ne: 4,
+                sw: 0,
+                se: 0,
+            },
+            shade_rgb(cloth, 1.08).gamma_multiply(0.35),
+        );
+        painter.rect_stroke(front, r, Stroke::new(1.0_f32, cloth_edge), StrokeKind::Inside);
+        // thin tab
+        let tab = Rect::from_min_size(pos2(face.min.x + 14.0, face.min.y - 1.0), vec2(44.0, 16.0));
+        painter.rect_filled(
+            tab,
             CornerRadius {
                 nw: 6,
                 ne: 6,
                 sw: 0,
                 se: 0,
             },
-            cloth_lit.gamma_multiply(0.55),
-        );
-        painter.rect_stroke(
-            front,
-            r_front,
-            Stroke::new(1.15_f32, shade_rgb(cloth, 0.52)),
-            StrokeKind::Inside,
-        );
-        // pocket lip
-        painter.line_segment(
-            [
-                pos2(front.min.x + 8.0, front.min.y + 1.0),
-                pos2(front.max.x - 8.0, front.min.y + 1.0),
-            ],
-            Stroke::new(2.2_f32, shade_rgb(cloth, 0.40)),
+            shade_rgb(cloth, 1.06),
         );
 
-        // Index tab
-        let tab = Rect::from_min_size(
-            pos2(face.min.x + 14.0, face.min.y - 2.0),
-            vec2(78.0, 34.0),
-        );
-        let r_tab = CornerRadius {
-            nw: 10,
-            ne: 10,
-            sw: 0,
-            se: 0,
-        };
-        painter.rect_filled(tab, r_tab, cloth_lit);
-        painter.rect_stroke(
-            tab,
-            r_tab,
-            Stroke::new(1.0_f32, shade_rgb(cloth, 0.48)),
-            StrokeKind::Inside,
-        );
-        let tab_label = meta.title.chars().take(8).collect::<String>();
-        painter.text(
-            tab.center() + vec2(0.0, 2.0),
-            Align2::CENTER_CENTER,
-            tab_label,
-            self.look.mono(11.0),
-            paper,
-        );
-
-        // Label plate on the front
-        let plate = Rect::from_min_max(
-            pos2(front.min.x + 18.0, front.min.y + 28.0),
-            pos2(front.max.x - 18.0, front.max.y - 52.0),
-        );
-        painter.rect_filled(plate, CornerRadius::same(10), paper);
-        painter.rect_stroke(
-            plate,
-            CornerRadius::same(10),
-            Stroke::new(1.0_f32, ink.gamma_multiply(0.14)),
-            StrokeKind::Inside,
-        );
-        painter.line_segment(
-            [
-                pos2(plate.min.x + 12.0, plate.min.y + 36.0),
-                pos2(plate.max.x - 12.0, plate.min.y + 38.0),
-            ],
-            Stroke::new(1.35_f32, ink.gamma_multiply(0.45)),
-        );
-        painter.text(
-            pos2(plate.min.x + 14.0, plate.min.y + 48.0),
-            Align2::LEFT_TOP,
-            &meta.title,
-            self.look.serif(18.0),
-            ink,
-        );
-        let date = meta.updated.format("%d %b %Y").to_string().to_lowercase();
-        painter.text(
-            pos2(plate.min.x + 14.0, plate.max.y - 18.0),
-            Align2::LEFT_BOTTOM,
-            date,
-            self.look.mono(11.0),
-            ink.gamma_multiply(0.55),
-        );
-        if meta.pinned {
-            painter.circle_filled(pos2(plate.max.x - 16.0, plate.min.y + 16.0), 4.5, self.look.accent);
-        }
-
-        // Decorative stitch on the pocket
-        let mut sx = front.min.x + 14.0;
-        while sx < front.max.x - 14.0 {
-            painter.line_segment(
-                [
-                    pos2(sx, front.max.y - 14.0),
-                    pos2((sx + 5.0).min(front.max.x - 14.0), front.max.y - 14.0),
-                ],
-                Stroke::new(1.1_f32, shade_rgb(cloth, 0.42)),
-            );
-            sx += 10.0;
-        }
-
-        let trash_col = self
-            .look
-            .inks
-            .get(2)
-            .copied()
-            .unwrap_or(Color32::from_rgb(0xe2, 0x4b, 0x4a));
-        let icon = 30.0;
-        let gap = 5.0;
-        let n_icons = 3.0;
-        let strip = n_icons * icon + (n_icons - 1.0) * gap + 6.0;
-        let origin = pos2(face.max.x - 16.0 - strip, face.max.y - 18.0 - icon);
         let mut act = None;
-        let dup_r = Rect::from_min_size(origin, vec2(icon, icon));
-        let pin_r = Rect::from_min_size(origin + vec2(icon + gap, 0.0), vec2(icon, icon));
-        let del_r = Rect::from_min_size(
-            origin + vec2(icon * 2.0 + gap * 2.0 + 6.0, 0.0),
-            vec2(icon, icon),
-        );
+        let show_icons = e > 0.08;
+        if show_icons {
+            let trash_col = self
+                .look
+                .inks
+                .get(2)
+                .copied()
+                .unwrap_or(Color32::from_rgb(0xe2, 0x4b, 0x4a));
+            let a = (40.0 + 215.0 * e).clamp(0.0, 255.0) as u8;
+            let ink = Color32::from_rgba_unmultiplied(
+                self.look.fg.r(),
+                self.look.fg.g(),
+                self.look.fg.b(),
+                a,
+            );
+            let trash = Color32::from_rgba_unmultiplied(trash_col.r(), trash_col.g(), trash_col.b(), a);
+            let pin_col = if meta.pinned {
+                Color32::from_rgba_unmultiplied(
+                    self.look.accent.r(),
+                    self.look.accent.g(),
+                    self.look.accent.b(),
+                    a,
+                )
+            } else {
+                ink
+            };
+            let icon = 24.0;
+            let gap = 10.0;
+            let strip = 3.0 * icon + 2.0 * gap;
+            let origin = pos2(face.center().x - strip * 0.5, face.max.y + 6.0);
+            let dup_r = Rect::from_min_size(origin, vec2(icon, icon));
+            let pin_r = Rect::from_min_size(origin + vec2(icon + gap, 0.0), vec2(icon, icon));
+            let del_r = Rect::from_min_size(origin + vec2(2.0 * (icon + gap), 0.0), vec2(icon, icon));
 
-        if self
-            .dos_icon(
-                ui,
-                &painter,
-                id.with("dup"),
-                dup_r,
-                self.look.ink,
-                None,
-                paint_copy_pages,
-            )
-            .on_hover_text("dupliquer")
-            .clicked()
-        {
-            act = Some(DosAct::Dup);
-        }
-        let pin_fg = if meta.pinned {
-            self.look.accent
-        } else {
-            self.look.ink
-        };
-        if self
-            .dos_icon(ui, &painter, id.with("pin"), pin_r, pin_fg, None, paint_pin)
-            .on_hover_text(if meta.pinned { "détacher" } else { "épingler" })
-            .clicked()
-        {
-            act = Some(DosAct::Pin);
-        }
-        if self
-            .dos_icon(
-                ui,
-                &painter,
-                id.with("del"),
-                del_r,
-                trash_col,
-                Some(trash_col),
-                paint_bin,
-            )
-            .on_hover_text("jeter")
-            .clicked()
-        {
-            act = Some(DosAct::Del);
+            if self
+                .dos_icon(ui, &painter, id.with("dup"), dup_r, ink, paint_copy_pages)
+                .on_hover_text("dupliquer")
+                .clicked()
+            {
+                act = Some(DosAct::Dup);
+            }
+            if self
+                .dos_icon(ui, &painter, id.with("pin"), pin_r, pin_col, paint_pin)
+                .on_hover_text(if meta.pinned { "détacher" } else { "épingler" })
+                .clicked()
+            {
+                act = Some(DosAct::Pin);
+            }
+            if self
+                .dos_icon(ui, &painter, id.with("del"), del_r, trash, paint_bin)
+                .on_hover_text("jeter")
+                .clicked()
+            {
+                act = Some(DosAct::Del);
+            }
         }
 
         if act.is_none() && resp.clicked() {
@@ -1336,44 +1252,16 @@ impl CahierApp {
         id: Id,
         rect: Rect,
         fg: Color32,
-        danger: Option<Color32>,
         paint: impl FnOnce(&Painter, Pos2, Color32),
     ) -> Response {
         let resp = ui.interact(rect, id, Sense::click());
         let c = rect.center();
-        let r = rect.width() * 0.46;
-        painter.circle_filled(
-            c + vec2(0.7, 1.1),
-            r,
-            self.look.shadow.gamma_multiply(0.55),
-        );
-        let fill = if let Some(d) = danger {
-            if resp.hovered() {
-                mix_col(self.look.paper, d, 0.28)
-            } else {
-                mix_col(self.look.paper, d, 0.10)
-            }
-        } else if resp.hovered() {
-            self.look.paper
+        let col = if resp.hovered() {
+            Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), fg.a().max(220))
         } else {
-            self.look.paper.gamma_multiply(0.96)
+            fg
         };
-        painter.circle_filled(c, r, fill);
-        painter.circle_stroke(
-            c,
-            r,
-            Stroke::new(
-                1.05_f32,
-                if danger.is_some() {
-                    fg.gamma_multiply(if resp.hovered() { 0.85 } else { 0.55 })
-                } else {
-                    self.look
-                        .ink
-                        .gamma_multiply(if resp.hovered() { 0.28 } else { 0.14 })
-                },
-            ),
-        );
-        paint(painter, c, fg);
+        paint(painter, c, col);
         resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
@@ -1619,9 +1507,6 @@ impl CahierApp {
                 });
         });
         ctx.data_mut(|d| d.insert_temp(Id::new("dock-rect"), inner.response.rect));
-        if self.dock_float.is_some() {
-            ctx.request_repaint();
-        }
     }
 
     fn dock_inner(&mut self, ui: &mut Ui, vertical: bool) {
@@ -2891,17 +2776,6 @@ fn shade_rgb(c: Color32, k: f32) -> Color32 {
     )
 }
 
-fn mix_col(a: Color32, b: Color32, t: f32) -> Color32 {
-    let t = t.clamp(0.0, 1.0);
-    let u = 1.0 - t;
-    Color32::from_rgba_unmultiplied(
-        (a.r() as f32 * u + b.r() as f32 * t) as u8,
-        (a.g() as f32 * u + b.g() as f32 * t) as u8,
-        (a.b() as f32 * u + b.b() as f32 * t) as u8,
-        (a.a() as f32 * u + b.a() as f32 * t) as u8,
-    )
-}
-
 fn paint_copy_pages(p: &egui::Painter, c: Pos2, fg: Color32) {
     let st = Stroke::new(1.55_f32, fg);
     let a = Rect::from_center_size(c + vec2(-2.2, 1.6), vec2(11.4, 13.2));
@@ -2946,6 +2820,17 @@ fn paint_bin(p: &egui::Painter, c: Pos2, fg: Color32) {
         [pos2(c.x + 2.2, c.y - 1.2), pos2(c.x + 1.6, c.y + 5.4)],
         Stroke::new(1.35_f32, shade_rgb(fg, 0.55)),
     );
+}
+
+fn paint_help(p: &egui::Painter, c: Pos2, fg: Color32) {
+    p.circle_stroke(c + vec2(0.0, -1.2), 8.2, Stroke::new(1.7_f32, fg));
+    // "?"
+    p.circle_filled(pos2(c.x, c.y + 5.6), 1.35, fg);
+    let st = Stroke::new(1.85_f32, fg);
+    p.line_segment([pos2(c.x - 3.2, c.y - 4.2), pos2(c.x - 1.2, c.y - 5.8)], st);
+    p.line_segment([pos2(c.x - 1.2, c.y - 5.8), pos2(c.x + 2.8, c.y - 5.4)], st);
+    p.line_segment([pos2(c.x + 2.8, c.y - 5.4), pos2(c.x + 2.4, c.y - 2.2)], st);
+    p.line_segment([pos2(c.x + 2.4, c.y - 2.2), pos2(c.x, c.y + 0.4)], st);
 }
 
 fn paint_plus(p: &egui::Painter, c: Pos2, fg: Color32) {

@@ -154,7 +154,7 @@ impl TabletBridge {
         let _ = inner.conn.flush();
         match inner.queue.dispatch_pending(&mut inner.state) {
             Ok(_) => {}
-            Err(_e) => {
+            Err(_) => {
                 self.dead = true;
                 self.inner = None;
                 return;
@@ -191,13 +191,7 @@ impl TabletBridge {
         }
         match &self.inner {
             None => true,
-            Some(i) => {
-                i.state.in_proximity
-                    || i.state.down
-                    || i.state.pinching
-                    || i.state.manager.is_none()
-                    || i.state.gestures.is_none()
-            }
+            Some(i) => i.state.in_proximity || i.state.down || i.state.pinching,
         }
     }
 }

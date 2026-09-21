@@ -70,7 +70,7 @@ impl HandMode {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Index {
     pub seeded: bool,
     pub notes: Vec<NoteMeta>,
@@ -78,8 +78,25 @@ pub struct Index {
     pub dock: DockEdge,
     #[serde(default)]
     pub hand: HandMode,
-    #[serde(default)]
+    /// `true` = tuto fermé (bouton seul).
+    #[serde(default = "default_true")]
     pub fiche_pliee: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Index {
+    fn default() -> Self {
+        Self {
+            seeded: false,
+            notes: Vec::new(),
+            dock: DockEdge::default(),
+            hand: HandMode::default(),
+            fiche_pliee: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
