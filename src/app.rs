@@ -14,6 +14,7 @@ use crate::ink::{
     InkStroke, Nib, Tool,
 };
 use crate::library::{ensure_png, image_size, DockEdge, Library, NoteMode};
+use crate::fonts;
 use crate::look::Look;
 use crate::pressure::Pressure;
 use crate::seed;
@@ -24,8 +25,13 @@ const DOS_W: f32 = 128.0;
 const DOS_H: f32 = 172.0;
 const DOS_PAD: f32 = 14.0;
 const PAPER_PEEK: f32 = 28.0;
-const TITLE_BAND: f32 = 44.0;
+const TITLE_BAND: f32 = 54.0;
 const ICON_ROW: f32 = 30.0;
+
+const FOLDER_EMOJIS: &[&str] = &[
+    "📝", "📕", "📗", "📘", "📙", "📒", "📓", "✨", "💡", "🎯", "⭐", "🔥", "🌙", "☕",
+    "🎵", "📐", "🧪", "🧠", "💼", "🗂️", "📌", "🖤", "🌿", "🚀", "💎", "🔮",
+];
 
 #[derive(Clone)]
 enum Scene {
@@ -39,6 +45,8 @@ enum DosAct {
     Dup,
     Pin,
     Del,
+    Emoji,
+    Rename,
 }
 
 struct Toast {
@@ -104,6 +112,10 @@ pub struct CahierApp {
     cursor_off: bool,
     /// Stylet était en proximité la frame d’avant (pour PointerGone).
     pen_was_prox: bool,
+    /// Sélecteur d’emoji ouvert pour ce note.
+    emoji_pick: Option<Uuid>,
+    /// Renommage inline sur l’étagère.
+    rename_id: Option<Uuid>,
 }
 
 impl CahierApp {
@@ -157,6 +169,8 @@ impl CahierApp {
             prox_flipped: false,
             cursor_off: false,
             pen_was_prox: false,
+            emoji_pick: None,
+            rename_id: None,
         };
         if let Ok(q) = std::env::var("CAHIER_OPEN") {
             let q = q.trim().to_lowercase();
@@ -965,6 +979,8 @@ impl CahierApp {
                 let mut del = None;
                 let mut dup = None;
                 let mut pin = None;
+                let mut emoji_for = None;
+                let mut rename_for = None;
 
                 ScrollArea::vertical().show(ui, |ui| {
                     ui.add_space(4.0);
@@ -987,6 +1003,8 @@ impl CahierApp {
                                     Some(DosAct::Dup) => dup = Some(meta.id),
                                     Some(DosAct::Pin) => pin = Some(meta.id),
                                     Some(DosAct::Del) => del = Some(meta.id),
+                                    Some(DosAct::Emoji) => emoji_for = Some(meta.id),
+                                    Some(DosAct::Rename) => rename_for = Some(meta.id),
                                     None => {}
                                 }
                                 ui.add_space(gap);
@@ -996,7 +1014,20 @@ impl CahierApp {
                     }
                 });
 
+                if let Some(id) = emoji_for {
+                    self.emoji_pick = Some(id);
+                    self.rename_id = None;
+                }
+                if let Some(id) = rename_for {
+                    if let Some(m) = self.lib.index.notes.iter().find(|n| n.id == id) {
+                        self.title_buf = m.title.clone();
+                    }
+                    self.rename_id = Some(id);
+                    self.emoji_pick = None;
+                }
                 if let Some(id) = open {
+                    self.emoji_pick = None;
+                    self.rename_id = None;
                     self.open_note(id);
                 }
                 if let Some(id) = dup {
@@ -1013,6 +1044,9 @@ impl CahierApp {
                 }
                 if let Some(id) = del {
                     self.lib.delete_note(id);
+                    if self.rename_id == Some(id) {
+                        self.rename_id = None;
+                    }
                 }
             });
         Area::new(Id::new("fab-nouveau"))
@@ -1029,12 +1063,12 @@ impl CahierApp {
 
         let fiche_ouverte = !self.lib.index.fiche_pliee;
         Area::new(Id::new("shelf-tuto-btn"))
-            .anchor(Align2::RIGHT_TOP, vec2(-28.0, -22.0))
+            .anchor(Align2::RIGHT_TOP, vec2(-24.0, -20.0))
             .order(Order::Foreground)
             .show(ctx, |ui| {
                 if self
-                    .round_well(ui, 44.0, false, paint_help)
-                    .on_hover_text(if fiche_ouverte { "Close" } else { "Help  ·  /" })
+                    .help_seal(ui, fiche_ouverte)
+                    .on_hover_text(if fiche_ouverte { "Close" } else { "Help" })
                     .clicked()
                 {
                     self.lib.index.fiche_pliee = !self.lib.index.fiche_pliee;
@@ -1043,104 +1077,356 @@ impl CahierApp {
             });
         if !self.lib.index.fiche_pliee {
             Area::new(Id::new("shelf-tuto-fiche"))
-                .anchor(Align2::RIGHT_TOP, vec2(-28.0, -78.0))
+                .anchor(Align2::RIGHT_TOP, vec2(-24.0, -82.0))
                 .order(Order::Foreground)
                 .show(ctx, |ui| {
                     self.fiche_pupitre(ui);
                 });
         }
+        if let Some(id) = self.emoji_pick {
+            self.ui_emoji_picker(ctx, id);
+        }
+    }
+
+    fn help_seal(&self, ui: &mut Ui, open: bool) -> Response {
+        let size = 52.0;
+        let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+        let p = ui.painter();
+        let id = Id::new("help-seal");
+        let hover_t = ui.ctx().animate_bool_with_time(id.with("h"), resp.hovered() || open, 0.22);
+        let e = hover_t * hover_t * (3.0 - 2.0 * hover_t);
+        let c = rect.center() - vec2(0.0, e * 1.5);
+        let r = size * 0.44;
+
+        // Soft desk shadow
+        p.circle_filled(
+            c + vec2(1.6, 3.2 + e),
+            r + 0.5,
+            self.look.shadow.gamma_multiply(0.45 + 0.15 * e),
+        );
+
+        // Wax body
+        let wax = if open {
+            self.look.accent
+        } else {
+            mix_col(self.look.paper, self.look.accent, 0.08 + 0.12 * e)
+        };
+        p.circle_filled(c, r, wax);
+        // Emboss rim
+        p.circle_stroke(
+            c,
+            r - 0.4,
+            Stroke::new(
+                2.2_f32,
+                if open {
+                    self.look.desk_deep.gamma_multiply(0.28)
+                } else {
+                    self.look.ink.gamma_multiply(0.16)
+                },
+            ),
+        );
+        p.circle_stroke(
+            c,
+            r * 0.72,
+            Stroke::new(
+                1.05_f32,
+                if open {
+                    self.look.desk_deep.gamma_multiply(0.22)
+                } else {
+                    self.look.ink.gamma_multiply(0.10)
+                },
+            ),
+        );
+        // Tiny bead marks around the rim
+        for i in 0..8 {
+            let a = i as f32 * std::f32::consts::TAU / 8.0 + 0.2;
+            let bead = c + vec2(a.cos(), a.sin()) * (r * 0.86);
+            p.circle_filled(
+                bead,
+                1.15,
+                if open {
+                    self.look.desk_deep.gamma_multiply(0.35)
+                } else {
+                    self.look.ink.gamma_multiply(0.18)
+                },
+            );
+        }
+
+        let fg = if open {
+            self.look.desk_deep
+        } else {
+            self.look.ink
+        };
+        p.text(
+            c + vec2(0.0, -1.0),
+            Align2::CENTER_CENTER,
+            "?",
+            self.look.serif(26.0),
+            fg,
+        );
+        resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
     fn fiche_pupitre(&mut self, ui: &mut Ui) {
-        let w = 480.0_f32.min(ui.ctx().screen_rect().width() - 72.0).max(280.0);
-        let h = 176.0;
+        let w = 352.0_f32.min(ui.ctx().screen_rect().width() - 48.0).max(280.0);
+        let h = 318.0;
         let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
         let p = ui.painter_at(rect);
         let ink = self.look.ink;
         let mute = ink.gamma_multiply(0.52);
+        let paper = self.look.paper;
+        let rule = self.look.paper_rule;
+        let accent = self.look.accent;
+
+        // Layered card shadow (desk blotter)
         p.rect_filled(
-            rect.translate(vec2(3.0, 4.0)),
-            CornerRadius::same(4),
-            self.look.shadow,
+            rect.translate(vec2(5.0, 8.0)),
+            CornerRadius::same(6),
+            self.look.shadow.gamma_multiply(0.55),
         );
-        p.rect_filled(rect, CornerRadius::same(4), self.look.paper);
-        p.rect_stroke(
-            rect,
-            CornerRadius::same(4),
-            Stroke::new(1.0_f32, ink.gamma_multiply(0.18)),
-            StrokeKind::Inside,
+        p.rect_filled(
+            rect.translate(vec2(2.0, 3.0)),
+            CornerRadius::same(5),
+            self.look.shadow.gamma_multiply(0.28),
         );
-        for i in 0..3 {
-            let t = i as f32 / 2.0;
-            let y = rect.min.y + 14.0 + t * (h - 28.0);
-            let c = pos2(rect.min.x + 13.0, y);
-            p.circle_filled(c, 3.4, self.look.punch);
-            p.circle_stroke(c, 3.4, Stroke::new(1.0_f32, ink.gamma_multiply(0.28)));
-        }
+
+        // Card body — slight warm offset from paper
+        let card = mix_col(paper, accent, 0.04);
+        p.rect_filled(rect, CornerRadius::same(4), card);
+        // Dog-ear fold top-right
+        let ear = [
+            pos2(rect.max.x - 22.0, rect.min.y),
+            pos2(rect.max.x, rect.min.y),
+            pos2(rect.max.x, rect.min.y + 22.0),
+        ];
+        p.add(Shape::convex_polygon(
+            ear.to_vec(),
+            mix_col(card, ink, 0.08),
+            Stroke::NONE,
+        ));
         p.line_segment(
-            [
-                pos2(rect.min.x + 24.0, rect.min.y + 8.0),
-                pos2(rect.min.x + 24.0, rect.max.y - 8.0),
-            ],
-            Stroke::new(1.0_f32, self.look.paper_rule_strong),
+            [pos2(rect.max.x - 22.0, rect.min.y), pos2(rect.max.x, rect.min.y + 22.0)],
+            Stroke::new(1.0_f32, ink.gamma_multiply(0.14)),
         );
+
+        // Left ledger stripe
+        p.rect_filled(
+            Rect::from_min_max(
+                pos2(rect.min.x + 18.0, rect.min.y + 14.0),
+                pos2(rect.min.x + 20.2, rect.max.y - 18.0),
+            ),
+            CornerRadius::same(1),
+            accent.gamma_multiply(0.75),
+        );
+
+        // Header
         p.text(
-            pos2(rect.min.x + 36.0, rect.min.y + 10.0),
+            pos2(rect.min.x + 34.0, rect.min.y + 18.0),
             Align2::LEFT_TOP,
-            "Shortcuts",
-            self.look.serif(17.0),
+            "Field notes",
+            self.look.serif(23.0),
             ink,
         );
-        let y0 = rect.min.y + 38.0;
-        let col2 = (rect.min.x + 36.0 + (w - 52.0) * 0.48).min(rect.max.x - 220.0);
-        let left = [
-            "souris      écrit",
-            "espace      panorama",
-            "e / shift+e sélection / zone",
-            "p b c h     plumes",
-            "ctrl+z      annuler",
+        p.text(
+            pos2(rect.min.x + 34.0, rect.min.y + 44.0),
+            Align2::LEFT_TOP,
+            "Ink & gestures",
+            self.look.mono(11.0),
+            mute,
+        );
+        // Accent underline under title
+        p.line_segment(
+            [
+                pos2(rect.min.x + 34.0, rect.min.y + 66.0),
+                pos2(rect.min.x + 118.0, rect.min.y + 66.0),
+            ],
+            Stroke::new(1.6_f32, accent.gamma_multiply(0.85)),
+        );
+        p.line_segment(
+            [
+                pos2(rect.min.x + 34.0, rect.min.y + 70.0),
+                pos2(rect.max.x - 28.0, rect.min.y + 70.0),
+            ],
+            Stroke::new(0.8_f32, rule),
+        );
+
+        let rows = [
+            ("Draw", "Stylus or mouse"),
+            ("Pan", "Space · drag"),
+            ("Erase", "E · hold right"),
+            ("Tools", "P  B  C  H"),
+            ("Undo", "Ctrl+Z · two-finger"),
+            ("Lasso", "L · stylus btn 2"),
+            ("Mode", "K · desk / tablet"),
         ];
-        for (i, line) in left.iter().enumerate() {
+        let y0 = rect.min.y + 86.0;
+        let row_h = 28.0;
+        for (i, (k, v)) in rows.iter().enumerate() {
+            let y = y0 + i as f32 * row_h;
+            // Ruled line
+            p.line_segment(
+                [
+                    pos2(rect.min.x + 34.0, y + row_h - 4.0),
+                    pos2(rect.max.x - 24.0, y + row_h - 4.0),
+                ],
+                Stroke::new(0.7_f32, rule.gamma_multiply(0.85)),
+            );
+            // Action label on the left
             p.text(
-                pos2(rect.min.x + 36.0, y0 + i as f32 * 16.5),
+                pos2(rect.min.x + 36.0, y + 4.0),
                 Align2::LEFT_TOP,
-                *line,
-                self.look.mono(12.0),
+                *k,
+                self.look.serif(15.0),
+                ink,
+            );
+            // Keycaps on the right as soft pills
+            let key_w = 148.0_f32.min((rect.width() - 120.0).max(100.0));
+            let key_rect = Rect::from_min_size(
+                pos2(rect.max.x - 24.0 - key_w, y + 2.0),
+                vec2(key_w, 20.0),
+            );
+            p.rect_filled(
+                key_rect,
+                CornerRadius::same(4),
+                mix_col(card, ink, 0.05),
+            );
+            p.rect_stroke(
+                key_rect,
+                CornerRadius::same(4),
+                Stroke::new(0.8_f32, ink.gamma_multiply(0.10)),
+                StrokeKind::Inside,
+            );
+            p.text(
+                key_rect.center(),
+                Align2::CENTER_CENTER,
+                *v,
+                self.look.mono(11.0),
                 mute,
             );
         }
-        if col2 > rect.min.x + 180.0 {
-            let right = [
-                "stylet      écrit",
-                "doigt       pousse",
-                "2 doigts    tap = annuler",
-                "bouton 1    dernière gomme",
-                "bouton 2    lasso",
-            ];
-            for (i, line) in right.iter().enumerate() {
-                p.text(
-                    pos2(col2, y0 + i as f32 * 16.5),
-                    Align2::LEFT_TOP,
-                    *line,
-                    self.look.mono(12.0),
-                    mute,
-                );
-            }
-        }
-        if resp.hovered() {
-            p.rect_stroke(
-                rect,
-                CornerRadius::same(4),
-                Stroke::new(1.2_f32, ink.gamma_multiply(0.45)),
-                StrokeKind::Outside,
-            );
-        }
+
+        // Footer whisper
+        p.text(
+            pos2(rect.center().x, rect.max.y - 14.0),
+            Align2::CENTER_BOTTOM,
+            "tap to tuck away",
+            self.look.mono(10.0),
+            mute.gamma_multiply(0.85),
+        );
+
+        p.rect_stroke(
+            rect,
+            CornerRadius::same(4),
+            Stroke::new(
+                1.0_f32,
+                if resp.hovered() {
+                    accent.gamma_multiply(0.55)
+                } else {
+                    ink.gamma_multiply(0.12)
+                },
+            ),
+            StrokeKind::Inside,
+        );
+
         if resp.clicked() {
             self.lib.index.fiche_pliee = true;
             self.lib.save_index();
         }
         resp.on_hover_cursor(CursorIcon::PointingHand)
             .on_hover_text("Close");
+    }
+
+    fn ui_emoji_picker(&mut self, ctx: &Context, note_id: Uuid) {
+        let mut chosen: Option<String> = None;
+        let mut dismiss = false;
+        Area::new(Id::new("emoji-pick").with(note_id))
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                Frame::NONE
+                    .fill(self.look.paper)
+                    .stroke(Stroke::new(1.0_f32, self.look.ink.gamma_multiply(0.14)))
+                    .corner_radius(16)
+                    .inner_margin(Margin::symmetric(16, 14))
+                    .show(ui, |ui| {
+                        ui.set_max_width(320.0);
+                        ui.label(
+                            RichText::new("Icon")
+                                .font(self.look.serif(18.0))
+                                .color(self.look.ink),
+                        );
+                        ui.add_space(10.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                            for em in FOLDER_EMOJIS {
+                                let (rect, resp) =
+                                    ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
+                                let p = ui.painter();
+                                if resp.hovered() {
+                                    p.rect_filled(
+                                        rect,
+                                        CornerRadius::same(10),
+                                        self.look.accent.gamma_multiply(0.22),
+                                    );
+                                }
+                                p.text(
+                                    rect.center(),
+                                    Align2::CENTER_CENTER,
+                                    *em,
+                                    FontId::new(22.0, fonts::emoji_font()),
+                                    self.look.ink,
+                                );
+                                if resp.clicked() {
+                                    chosen = Some((*em).to_string());
+                                }
+                            }
+                            let (rect, resp) =
+                                ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
+                            let p = ui.painter();
+                            if resp.hovered() {
+                                p.rect_filled(
+                                    rect,
+                                    CornerRadius::same(10),
+                                    self.look.ink.gamma_multiply(0.08),
+                                );
+                            }
+                            p.text(
+                                rect.center(),
+                                Align2::CENTER_CENTER,
+                                "×",
+                                self.look.mono(16.0),
+                                self.look.ink.gamma_multiply(0.55),
+                            );
+                            if resp.clicked() {
+                                chosen = Some(String::new());
+                            }
+                        });
+                        ui.add_space(8.0);
+                        if ui
+                            .add(
+                                Label::new(
+                                    RichText::new("Dismiss")
+                                        .font(self.look.mono(11.0))
+                                        .color(self.look.ink.gamma_multiply(0.45)),
+                                )
+                                .sense(Sense::click()),
+                            )
+                            .clicked()
+                        {
+                            dismiss = true;
+                        }
+                    });
+            });
+        if let Some(em) = chosen {
+            if let Some(mut n) = self.lib.load_note(note_id) {
+                n.emoji = em;
+                n.touch();
+                self.lib.save_note(&n);
+            }
+            self.emoji_pick = None;
+        } else if dismiss {
+            self.emoji_pick = None;
+        }
     }
 
     fn cahier_dos(&mut self, ui: &mut Ui, meta: &crate::library::NoteMeta) -> Option<DosAct> {
@@ -1155,7 +1441,7 @@ impl CahierApp {
         if over {
             ui.ctx().request_repaint();
         }
-        let lift_t = ui.ctx().animate_bool_with_time(id.with("peek"), over, 0.36);
+        let lift_t = ui.ctx().animate_bool_with_time(id.with("peek"), over, 0.16);
         let e = lift_t * lift_t * (3.0 - 2.0 * lift_t);
         let cloth = self.look.cloth_at(meta.cover);
         let cloth_deep = shade_rgb(cloth, 0.70);
@@ -1183,9 +1469,9 @@ impl CahierApp {
             self.look.shadow.gamma_multiply(0.40 + 0.18 * e),
         );
 
-        // Feuille sous le titre (ne dépasse pas la ligne du titre)
-        let title_baseline = face.min.y - 24.0;
-        let peek_max = (face.min.y - title_baseline - 6.0).max(8.0);
+        // Titre plus haut pour laisser la feuille sortir sans le masquer
+        let title_baseline = face.min.y - 36.0;
+        let peek_max = (face.min.y - title_baseline - 8.0).max(8.0);
         let peek = (e * PAPER_PEEK).min(peek_max);
         if peek > 1.0 {
             let sheet = Rect::from_min_max(
@@ -1250,6 +1536,32 @@ impl CahierApp {
                 shade_rgb(paper, 0.94 - i as f32 * 0.04),
             );
         }
+
+        // Logo emoji on the leather
+        let logo_c = face.center() + vec2(4.0, 2.0);
+        let logo_r = Rect::from_center_size(logo_c, vec2(48.0, 48.0));
+        let emoji = meta.emoji.trim();
+        if !emoji.is_empty() {
+            painter.circle_filled(
+                logo_c,
+                22.0,
+                shade_rgb(cloth, 0.55).gamma_multiply(0.55),
+            );
+            painter.text(
+                logo_c + vec2(0.0, -1.0),
+                Align2::CENTER_CENTER,
+                emoji,
+                FontId::new(34.0, fonts::emoji_font()),
+                Color32::WHITE,
+            );
+        } else {
+            painter.circle_stroke(
+                logo_c,
+                18.0,
+                Stroke::new(1.2_f32, shade_rgb(cloth, 0.42)),
+            );
+        }
+
         if meta.pinned {
             let x = face.max.x - 16.0;
             let ribbon = [
@@ -1266,25 +1578,87 @@ impl CahierApp {
             ));
         }
 
-        // Titre en dernier — au-dessus de la feuille, plus lisible
-        let title: String = {
-            let t = meta.title.as_str();
-            if t.chars().count() > 18 {
-                format!("{}…", t.chars().take(16).collect::<String>())
-            } else {
-                t.to_string()
-            }
-        };
-        painter.text(
-            pos2(face.center().x, title_baseline),
-            Align2::CENTER_BOTTOM,
-            title,
-            self.look.serif(19.0),
-            self.look.fg,
+        let mut act = None;
+        let renaming = self.rename_id == Some(meta.id);
+        let title_rect = Rect::from_center_size(
+            pos2(face.center().x, title_baseline - 8.0),
+            vec2(DOS_W + 8.0, 28.0),
         );
 
-        let mut act = None;
-        let show_icons = e > 0.08;
+        if renaming {
+            let te_id = id.with("rename");
+            let mut commit = false;
+            let mut cancel = false;
+            ui.scope_builder(UiBuilder::new().max_rect(title_rect), |ui| {
+                ui.centered_and_justified(|ui| {
+                    let te = TextEdit::singleline(&mut self.title_buf)
+                        .font(self.look.serif(17.0))
+                        .desired_width(DOS_W)
+                        .frame(true)
+                        .id(te_id);
+                    let r = ui.add(te);
+                    if !r.has_focus() {
+                        r.request_focus();
+                    }
+                    if r.lost_focus() {
+                        if ui.input(|i| i.key_pressed(Key::Escape)) {
+                            cancel = true;
+                        } else {
+                            commit = true;
+                        }
+                    }
+                    if r.has_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        commit = true;
+                    }
+                });
+            });
+            if commit {
+                let title = self.title_buf.trim().to_string();
+                if !title.is_empty() {
+                    if let Some(mut n) = self.lib.load_note(meta.id) {
+                        n.title = title;
+                        n.touch();
+                        self.lib.save_note(&n);
+                    }
+                }
+                self.rename_id = None;
+            } else if cancel {
+                self.rename_id = None;
+            }
+        } else {
+            let title: String = {
+                let t = meta.title.as_str();
+                if t.chars().count() > 18 {
+                    format!("{}…", t.chars().take(16).collect::<String>())
+                } else {
+                    t.to_string()
+                }
+            };
+            painter.text(
+                pos2(face.center().x, title_baseline),
+                Align2::CENTER_BOTTOM,
+                title,
+                self.look.serif(19.0),
+                self.look.fg,
+            );
+            let title_resp = ui.interact(title_rect, id.with("title"), Sense::click());
+            if title_resp.hovered() {
+                painter.line_segment(
+                    [
+                        pos2(title_rect.min.x + 10.0, title_baseline + 2.0),
+                        pos2(title_rect.max.x - 10.0, title_baseline + 2.0),
+                    ],
+                    Stroke::new(1.0_f32, self.look.fg.gamma_multiply(0.35)),
+                );
+            }
+            if title_resp.clicked() {
+                act = Some(DosAct::Rename);
+            }
+            title_resp.on_hover_cursor(CursorIcon::Text);
+        }
+
+        // Hover: pin + trash only
+        let show_icons = e > 0.08 && !renaming;
         if show_icons {
             let trash_col = self
                 .look
@@ -1311,20 +1685,12 @@ impl CahierApp {
                 ink
             };
             let icon = 24.0;
-            let gap = 10.0;
-            let strip = 3.0 * icon + 2.0 * gap;
+            let gap = 14.0;
+            let strip = 2.0 * icon + gap;
             let origin = pos2(face.center().x - strip * 0.5, face.max.y + 6.0);
-            let dup_r = Rect::from_min_size(origin, vec2(icon, icon));
-            let pin_r = Rect::from_min_size(origin + vec2(icon + gap, 0.0), vec2(icon, icon));
-            let del_r = Rect::from_min_size(origin + vec2(2.0 * (icon + gap), 0.0), vec2(icon, icon));
+            let pin_r = Rect::from_min_size(origin, vec2(icon, icon));
+            let del_r = Rect::from_min_size(origin + vec2(icon + gap, 0.0), vec2(icon, icon));
 
-            if self
-                .dos_icon(ui, &painter, id.with("dup"), dup_r, ink, paint_copy_pages)
-                .on_hover_text("Duplicate")
-                .clicked()
-            {
-                act = Some(DosAct::Dup);
-            }
             if self
                 .dos_icon(ui, &painter, id.with("pin"), pin_r, pin_col, paint_pin)
                 .on_hover_text(if meta.pinned { "Unpin" } else { "Pin" })
@@ -1341,10 +1707,63 @@ impl CahierApp {
             }
         }
 
-        if act.is_none() && resp.clicked() {
-            act = Some(DosAct::Open);
+        // Click logo → pick emoji
+        let logo_resp = ui.interact(logo_r, id.with("logo"), Sense::click());
+        if logo_resp.clicked() {
+            act = Some(DosAct::Emoji);
         }
-        resp.on_hover_cursor(CursorIcon::PointingHand);
+        logo_resp
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("Icon");
+
+        // Right-click: other folder actions
+        let mut menu_act = None;
+        resp.context_menu(|ui| {
+            ui.set_min_width(140.0);
+            if ui.button("Open").clicked() {
+                menu_act = Some(DosAct::Open);
+                ui.close();
+            }
+            if ui.button("Rename").clicked() {
+                menu_act = Some(DosAct::Rename);
+                ui.close();
+            }
+            if ui.button("Icon…").clicked() {
+                menu_act = Some(DosAct::Emoji);
+                ui.close();
+            }
+            if ui.button("Duplicate").clicked() {
+                menu_act = Some(DosAct::Dup);
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .button(if meta.pinned { "Unpin" } else { "Pin" })
+                .clicked()
+            {
+                menu_act = Some(DosAct::Pin);
+                ui.close();
+            }
+            if ui.button(RichText::new("Delete").color(Color32::from_rgb(0xe2, 0x4b, 0x4a))).clicked()
+            {
+                menu_act = Some(DosAct::Del);
+                ui.close();
+            }
+        });
+        if menu_act.is_some() {
+            act = menu_act;
+        }
+
+        if act.is_none() && !renaming && resp.clicked() {
+            let on_title = pointer.is_some_and(|p| title_rect.contains(p));
+            let on_logo = pointer.is_some_and(|p| logo_r.contains(p));
+            if !on_title && !on_logo {
+                act = Some(DosAct::Open);
+            }
+        }
+        if !renaming {
+            resp.clone().on_hover_cursor(CursorIcon::PointingHand);
+        }
         act
     }
 
@@ -3009,12 +3428,14 @@ fn shade_rgb(c: Color32, k: f32) -> Color32 {
     )
 }
 
-fn paint_copy_pages(p: &egui::Painter, c: Pos2, fg: Color32) {
-    let st = Stroke::new(1.55_f32, fg);
-    let a = Rect::from_center_size(c + vec2(-2.2, 1.6), vec2(11.4, 13.2));
-    let b = Rect::from_center_size(c + vec2(2.4, -1.8), vec2(11.4, 13.2));
-    p.rect_stroke(b, 2.4, st, StrokeKind::Inside);
-    p.rect_stroke(a, 2.4, st, StrokeKind::Inside);
+fn mix_col(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    Color32::from_rgba_unmultiplied(
+        (a.r() as f32 + (b.r() as f32 - a.r() as f32) * t) as u8,
+        (a.g() as f32 + (b.g() as f32 - a.g() as f32) * t) as u8,
+        (a.b() as f32 + (b.b() as f32 - a.b() as f32) * t) as u8,
+        (a.a() as f32 + (b.a() as f32 - a.a() as f32) * t) as u8,
+    )
 }
 
 fn paint_pin(p: &egui::Painter, c: Pos2, fg: Color32) {
@@ -3053,17 +3474,6 @@ fn paint_bin(p: &egui::Painter, c: Pos2, fg: Color32) {
         [pos2(c.x + 2.2, c.y - 1.2), pos2(c.x + 1.6, c.y + 5.4)],
         Stroke::new(1.35_f32, shade_rgb(fg, 0.55)),
     );
-}
-
-fn paint_help(p: &egui::Painter, c: Pos2, fg: Color32) {
-    p.circle_stroke(c + vec2(0.0, -1.2), 8.2, Stroke::new(1.7_f32, fg));
-    // "?"
-    p.circle_filled(pos2(c.x, c.y + 5.6), 1.35, fg);
-    let st = Stroke::new(1.85_f32, fg);
-    p.line_segment([pos2(c.x - 3.2, c.y - 4.2), pos2(c.x - 1.2, c.y - 5.8)], st);
-    p.line_segment([pos2(c.x - 1.2, c.y - 5.8), pos2(c.x + 2.8, c.y - 5.4)], st);
-    p.line_segment([pos2(c.x + 2.8, c.y - 5.4), pos2(c.x + 2.4, c.y - 2.2)], st);
-    p.line_segment([pos2(c.x + 2.4, c.y - 2.2), pos2(c.x, c.y + 0.4)], st);
 }
 
 fn paint_plus(p: &egui::Painter, c: Pos2, fg: Color32) {

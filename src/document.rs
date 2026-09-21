@@ -143,6 +143,8 @@ pub struct Note {
     pub title: String,
     pub paper: PaperKind,
     pub cover: u8,
+    #[serde(default)]
+    pub emoji: String,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
     pub pinned: bool,
@@ -161,6 +163,7 @@ impl Note {
             title: title.into(),
             paper: PaperKind::Millimetre,
             cover,
+            emoji: String::new(),
             created: now,
             updated: now,
             pinned: false,

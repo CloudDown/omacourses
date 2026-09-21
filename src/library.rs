@@ -13,6 +13,8 @@ pub struct NoteMeta {
     pub updated: DateTime<Utc>,
     pub pinned: bool,
     pub cover: u8,
+    #[serde(default)]
+    pub emoji: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +148,7 @@ impl Library {
             meta.updated = note.updated;
             meta.pinned = note.pinned;
             meta.cover = note.cover;
+            meta.emoji = note.emoji.clone();
         } else {
             self.index.notes.push(NoteMeta {
                 id: note.id,
@@ -153,6 +156,7 @@ impl Library {
                 updated: note.updated,
                 pinned: note.pinned,
                 cover: note.cover,
+                emoji: note.emoji.clone(),
             });
         }
         self.index.notes.sort_by(|a, b| {
@@ -176,7 +180,7 @@ impl Library {
     pub fn duplicate(&mut self, id: Uuid) -> Option<Note> {
         let mut note = self.load_note(id)?;
         note.id = Uuid::new_v4();
-        note.title = format!("{} (copie)", note.title);
+        note.title = format!("{} (copy)", note.title);
         note.touch();
         for page in &mut note.pages {
             for s in &mut page.strokes {

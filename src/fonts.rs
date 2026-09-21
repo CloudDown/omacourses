@@ -34,6 +34,29 @@ pub fn install(ctx: &egui::Context) {
             .insert(FontFamily::Name("serif".into()), vec!["serif".into()]);
     }
 
+    // Emoji (Noto Color) — fallback for proportional + dedicated family.
+    if let Some(data) = load_first(&[
+        "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+    ]) {
+        fonts
+            .font_data
+            .insert("emoji".into(), Arc::new(FontData::from_owned(data)));
+        fonts.families.insert(
+            FontFamily::Name("emoji".into()),
+            vec!["emoji".into()],
+        );
+        for fam in [
+            FontFamily::Proportional,
+            FontFamily::Monospace,
+            FontFamily::Name("serif".into()),
+        ] {
+            if let Some(list) = fonts.families.get_mut(&fam) {
+                list.push("emoji".into());
+            }
+        }
+    }
+
     ctx.set_fonts(fonts);
 }
 
@@ -52,6 +75,10 @@ pub fn mono_file() -> Option<PathBuf> {
     } else {
         Some(PathBuf::from(p))
     }
+}
+
+pub fn emoji_font() -> FontFamily {
+    FontFamily::Name("emoji".into())
 }
 
 fn load_first(paths: &[&str]) -> Option<Vec<u8>> {
