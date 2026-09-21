@@ -15,10 +15,28 @@ pub struct NoteMeta {
     pub cover: u8,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DockEdge {
+    Top,
+    #[default]
+    Bottom,
+    Left,
+    Right,
+}
+
+impl DockEdge {
+    pub fn vertical(self) -> bool {
+        matches!(self, Self::Left | Self::Right)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Index {
     pub seeded: bool,
     pub notes: Vec<NoteMeta>,
+    #[serde(default)]
+    pub dock: DockEdge,
 }
 
 #[derive(Clone, Debug)]

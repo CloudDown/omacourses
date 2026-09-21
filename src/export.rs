@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::document::{Note, PaperKind, PAGE_H, PAGE_W};
+use crate::document::{Note, PaperKind};
 use crate::ink::{ribbon_outline, InkStroke};
 use crate::look::Look;
 use flate2::write::ZlibEncoder;
@@ -10,8 +10,9 @@ use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, Pixmap, Stroke as SkS
 
 pub fn raster_page(note: &Note, page_i: usize, look: &Look, scale: f32, media: &MediaLoader) -> Option<Pixmap> {
     let page = note.pages.get(page_i)?;
-    let w = (PAGE_W * scale).round() as u32;
-    let h = (PAGE_H * scale).round() as u32;
+    let (page_w, page_h) = note.page_size();
+    let w = (page_w * scale).round() as u32;
+    let h = (page_h * scale).round() as u32;
     let mut pm = Pixmap::new(w, h)?;
     let paper = if note.paper == PaperKind::Slate {
         rgb(look.desk_deep)
@@ -20,7 +21,7 @@ pub fn raster_page(note: &Note, page_i: usize, look: &Look, scale: f32, media: &
     };
     pm.fill(paper);
     let t = Transform::from_scale(scale, scale);
-    draw_template(&mut pm, note.paper, look, t);
+    draw_template(&mut pm, note.paper, look, t, page_w, page_h);
     for im in &page.images {
         if let Some((iw, ih, rgba)) = media.rgba(&im.file) {
             blit(&mut pm, im.pos[0] * scale, im.pos[1] * scale, im.size[0] * scale, im.size[1] * scale, iw, ih, &rgba);
@@ -105,7 +106,7 @@ fn poly_path(pts: &[egui::Pos2]) -> Option<Path> {
     pb.finish()
 }
 
-fn draw_template(pm: &mut Pixmap, kind: PaperKind, look: &Look, t: Transform) {
+fn draw_template(pm: &mut Pixmap, kind: PaperKind, look: &Look, t: Transform, page_w: f32, page_h: f32) {
     let mut paint = Paint::default();
     paint.anti_alias = true;
     let mut stroke = SkStroke::default();
@@ -115,33 +116,33 @@ fn draw_template(pm: &mut Pixmap, kind: PaperKind, look: &Look, t: Transform) {
             paint.set_color(rgb(look.paper_rule));
             stroke.width = 0.8;
             let mut y = 88.0;
-            while y < PAGE_H - 24.0 {
-                line(pm, 56.0, y, PAGE_W - 24.0, y, &paint, &stroke, t);
+            while y < page_h - 24.0 {
+                line(pm, 56.0, y, page_w - 24.0, y, &paint, &stroke, t);
                 y += 28.0;
             }
             paint.set_color(rgb(look.accent));
-            line(pm, 64.0, 24.0, 64.0, PAGE_H - 24.0, &paint, &stroke, t);
+            line(pm, 64.0, 24.0, 64.0, page_h - 24.0, &paint, &stroke, t);
         }
         PaperKind::Grid => {
             paint.set_color(rgb(look.paper_rule));
             stroke.width = 0.6;
             let mut x = 24.0;
-            while x < PAGE_W {
-                line(pm, x, 24.0, x, PAGE_H - 24.0, &paint, &stroke, t);
+            while x < page_w {
+                line(pm, x, 24.0, x, page_h - 24.0, &paint, &stroke, t);
                 x += 24.0;
             }
             let mut y = 24.0;
-            while y < PAGE_H {
-                line(pm, 24.0, y, PAGE_W - 24.0, y, &paint, &stroke, t);
+            while y < page_h {
+                line(pm, 24.0, y, page_w - 24.0, y, &paint, &stroke, t);
                 y += 24.0;
             }
         }
         PaperKind::Dots => {
             paint.set_color(rgb(look.paper_rule_strong));
             let mut y = 32.0;
-            while y < PAGE_H - 16.0 {
+            while y < page_h - 16.0 {
                 let mut x = 32.0;
-                while x < PAGE_W - 16.0 {
+                while x < page_w - 16.0 {
                     if let Some(path) = {
                         let mut pb = PathBuilder::new();
                         pb.push_circle(x, y, 0.9);
@@ -158,25 +159,25 @@ fn draw_template(pm: &mut Pixmap, kind: PaperKind, look: &Look, t: Transform) {
             stroke.width = 0.45;
             let mut y = 40.0;
             let mut i = 0i32;
-            while y < PAGE_H - 20.0 {
+            while y < page_h - 20.0 {
                 paint.set_color(if i % 5 == 0 {
                     rgb(look.paper_rule_strong)
                 } else {
                     rgb(look.paper_rule)
                 });
-                line(pm, 48.0, y, PAGE_W - 20.0, y, &paint, &stroke, t);
+                line(pm, 48.0, y, page_w - 20.0, y, &paint, &stroke, t);
                 y += 8.0;
                 i += 1;
             }
             let mut x = 48.0;
             let mut i = 0i32;
-            while x < PAGE_W - 20.0 {
+            while x < page_w - 20.0 {
                 paint.set_color(if i % 5 == 0 {
                     rgb(look.paper_rule_strong)
                 } else {
                     rgb(look.paper_rule)
                 });
-                line(pm, x, 40.0, x, PAGE_H - 20.0, &paint, &stroke, t);
+                line(pm, x, 40.0, x, page_h - 20.0, &paint, &stroke, t);
                 x += 8.0;
                 i += 1;
             }

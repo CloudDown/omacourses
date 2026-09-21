@@ -27,3 +27,9 @@ tiny-skia = "0.11"
 fontdue = "0.9"
 flate2 = "1"
 arboard = "3"
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-backend = { version = "0.3.17", features = ["client_system", "dlopen"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }

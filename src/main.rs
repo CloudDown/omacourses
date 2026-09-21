@@ -8,6 +8,7 @@ mod library;
 mod look;
 mod pressure;
 mod seed;
+mod tablet;
 mod undo;
 
 use app::CahierApp;
@@ -35,8 +36,10 @@ Examples:
 
 Gestes (dans un cahier):
   p feutre   b plume   c crayon   h surligneur
-  e gomme    shift+e gomme zone   l lasso   t texte
+  e gomme (re-clic = zone)   l lasso   t texte
   [ ] épaisseur   1-9 encre   m papier
+  espace+glisser panorama   ctrl+molette zoom
+  glisser la poignée de la trousse → haut / bas / côtés
   espace+glisser panorama   ctrl+molette zoom
   shift relâché après un trait ≈ forme (ligne, cercle, rectangle)
   clic droit = gomme   ctrl+z/y   ctrl+e png   ctrl+shift+e pdf

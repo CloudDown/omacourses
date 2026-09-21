@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-use egui::{Color32, FontFamily, FontId, Stroke, Style, Visuals};
+use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, Style, Visuals};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThemeStamp {
@@ -160,6 +160,13 @@ impl Look {
         style.visuals.widgets.inactive.bg_fill = self.desk_edge;
         style.visuals.widgets.hovered.bg_fill = self.muted;
         style.visuals.widgets.active.bg_fill = self.accent;
+        style.visuals.widgets.inactive.corner_radius = CornerRadius::same(16);
+        style.visuals.widgets.hovered.corner_radius = CornerRadius::same(16);
+        style.visuals.widgets.active.corner_radius = CornerRadius::same(16);
+        style.visuals.widgets.open.corner_radius = CornerRadius::same(16);
+        style.visuals.widgets.noninteractive.corner_radius = CornerRadius::same(14);
+        style.visuals.window_corner_radius = CornerRadius::same(20);
+        style.visuals.menu_corner_radius = CornerRadius::same(16);
         style.visuals.selection.bg_fill = self.accent.gamma_multiply(0.35);
         style.visuals.hyperlink_color = self.accent;
         style.visuals.warn_fg_color = self.inks.get(4).copied().unwrap_or(self.accent);

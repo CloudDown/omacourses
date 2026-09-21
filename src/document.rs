@@ -8,6 +8,13 @@ pub const PAGE_W: f32 = 794.0;
 pub const PAGE_H: f32 = 1123.0;
 pub const PAGE_GAP: f32 = 56.0;
 
+fn default_page_w() -> f32 {
+    PAGE_W
+}
+fn default_page_h() -> f32 {
+    PAGE_H
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PaperKind {
     Blank,
@@ -137,6 +144,10 @@ pub struct Note {
     pub updated: DateTime<Utc>,
     pub pinned: bool,
     pub pages: Vec<Page>,
+    #[serde(default = "default_page_w")]
+    pub page_w: f32,
+    #[serde(default = "default_page_h")]
+    pub page_h: f32,
 }
 
 impl Note {
@@ -151,7 +162,32 @@ impl Note {
             updated: now,
             pinned: false,
             pages: vec![Page::default()],
+            page_w: PAGE_W,
+            page_h: PAGE_H,
         }
+    }
+
+    pub fn page_size(&self) -> (f32, f32) {
+        (self.page_w.max(1.0), self.page_h.max(1.0))
+    }
+
+    /// Agrandit la feuille pour coller au format de la fenêtre, sans recadrer l’encre.
+    pub fn grow_to_view(&mut self, avail: Vec2) -> bool {
+        let aw = avail.x.max(120.0);
+        let ah = avail.y.max(160.0);
+        let aspect = aw / ah;
+        let mut w = self.page_w.max(PAGE_W);
+        let mut h = self.page_h.max(PAGE_H);
+        let cur = w / h.max(1.0);
+        if aspect > cur + 0.001 {
+            w = (h * aspect).max(w);
+        } else if aspect < cur - 0.001 {
+            h = (w / aspect).max(h);
+        }
+        let changed = (w - self.page_w).abs() > 0.5 || (h - self.page_h).abs() > 0.5;
+        self.page_w = w;
+        self.page_h = h;
+        changed
     }
 
     pub fn touch(&mut self) {

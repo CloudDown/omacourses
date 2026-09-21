@@ -2137,12 +2137,16 @@ dependencies = [
  "flate2",
  "fontdue",
  "image",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",
  "tiny-skia",
  "toml",
  "uuid",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]

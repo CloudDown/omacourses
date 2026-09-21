@@ -7,16 +7,17 @@ use eframe::egui::*;
 use uuid::Uuid;
 
 use crate::camera::{page_at_y, page_origin, Camera};
-use crate::document::{ImageObj, Note, PaperKind, TextBox, PAGE_GAP, PAGE_H, PAGE_W};
+use crate::document::{ImageObj, Note, PaperKind, TextBox, PAGE_H, PAGE_W};
 use crate::export::{self, MediaLoader};
 use crate::ink::{
     default_width, draw_ants, erase_area, map_mesh, maybe_snap_shape, mixed_pressure, InkPoint,
     InkStroke, Nib, Tool,
 };
-use crate::library::{ensure_png, image_size, Library};
+use crate::library::{ensure_png, image_size, DockEdge, Library};
 use crate::look::Look;
 use crate::pressure::Pressure;
 use crate::seed;
+use crate::tablet::TabletBridge;
 use crate::undo::UndoStack;
 
 #[derive(Clone)]
@@ -68,6 +69,13 @@ pub struct CahierApp {
     toast: Option<Toast>,
     need_fit: bool,
     title_buf: String,
+    dock_edge: DockEdge,
+    dock_float: Option<Pos2>,
+    dock_grab: Vec2,
+    dock_moved: bool,
+    last_canvas: Vec2,
+    tablet: TabletBridge,
+    live_from_pen: bool,
 }
 
 impl CahierApp {
@@ -78,6 +86,7 @@ impl CahierApp {
         let mut lib = Library::open();
         seed::seed_if_needed(&mut lib);
         let width = default_width(Nib::Fineliner);
+        let dock_edge = lib.index.dock;
         let mut app = Self {
             look,
             lib,
@@ -104,18 +113,27 @@ impl CahierApp {
             toast: None,
             need_fit: true,
             title_buf: String::new(),
+            dock_edge,
+            dock_float: None,
+            dock_grab: Vec2::ZERO,
+            dock_moved: false,
+            last_canvas: Vec2::ZERO,
+            tablet: TabletBridge::new(),
+            live_from_pen: false,
         };
         if let Ok(q) = std::env::var("CAHIER_OPEN") {
-            let q = q.to_lowercase();
-            if let Some(id) = app
-                .lib
-                .index
-                .notes
-                .iter()
-                .find(|m| m.title.to_lowercase().contains(&q))
-                .map(|m| m.id)
-            {
-                app.open_note(id);
+            let q = q.trim().to_lowercase();
+            if !q.is_empty() {
+                if let Some(id) = app
+                    .lib
+                    .index
+                    .notes
+                    .iter()
+                    .find(|m| m.title.to_lowercase().contains(&q))
+                    .map(|m| m.id)
+                {
+                    app.open_note(id);
+                }
             }
         }
         app
@@ -134,6 +152,13 @@ impl CahierApp {
         } else {
             self.look.inks[self.color_i % self.look.inks.len()]
         }
+    }
+
+    fn ph(&self) -> f32 {
+        self.note
+            .as_ref()
+            .map(|n| n.page_h.max(1.0))
+            .unwrap_or(PAGE_H)
     }
 
     fn mark_dirty(&mut self) {
@@ -195,7 +220,14 @@ impl CahierApp {
 }
 
 impl eframe::App for CahierApp {
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
+        self.tablet.pump(frame);
+        let pen = self.tablet.snapshot();
+        if let Some(p) = pen.pressure {
+            self.pressure.push_touch(p);
+        } else if !pen.in_proximity {
+            self.pressure.clear();
+        }
         if self.look.drifted() {
             let next = Look::load();
             if next.stamp != self.look.stamp {
@@ -207,7 +239,11 @@ impl eframe::App for CahierApp {
                 self.toast(format!("thème {}", label.to_lowercase()), t);
             }
         }
-        ctx.request_repaint_after(std::time::Duration::from_millis(400));
+        if matches!(self.scene, Scene::Desk) || self.tablet.wants_repaint() {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(400));
+        }
         let t = ctx.input(|i| i.time);
         self.shortcuts(ctx);
         self.ingest_touch_pressure(ctx);
@@ -246,11 +282,12 @@ struct ShowToast<'a> {
 impl ShowToast<'_> {
     fn show(&self, ctx: &Context, msg: &str) {
         Area::new(Id::new("toast"))
-            .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -28.0))
+            .anchor(Align2::CENTER_TOP, vec2(0.0, 56.0))
             .show(ctx, |ui| {
                 Frame::NONE
                     .fill(self.look.desk_deep)
-                    .stroke(Stroke::new(1.0, self.look.accent))
+                    .corner_radius(20)
+                    .stroke(Stroke::new(1.0_f32, self.look.accent))
                     .inner_margin(Margin::symmetric(16, 8))
                     .show(ui, |ui| {
                         ui.label(RichText::new(msg).font(self.look.mono(13.0)).color(self.look.fg));
@@ -573,13 +610,6 @@ impl CahierApp {
                                 .color(self.look.fg_dim),
                         );
                     });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.add_space(36.0);
-                        let new = self.objet_btn(ui, "nouveau cahier", true);
-                        if new {
-                            self.new_note();
-                        }
-                    });
                 });
                 ui.add_space(18.0);
                 ui.horizontal(|ui| {
@@ -589,7 +619,8 @@ impl CahierApp {
                     };
                     Frame::NONE
                         .fill(self.look.desk_deep)
-                        .inner_margin(Margin::symmetric(12, 6))
+                        .corner_radius(22)
+                        .inner_margin(Margin::symmetric(16, 9))
                         .show(ui, |ui| {
                             ui.set_width(320.0);
                             let te = TextEdit::singleline(query)
@@ -701,6 +732,13 @@ impl CahierApp {
                     self.lib.delete_note(id);
                 }
             });
+        Area::new(Id::new("fab-nouveau"))
+            .anchor(Align2::RIGHT_BOTTOM, vec2(-28.0, -28.0))
+            .show(ctx, |ui| {
+                if self.round_action(ui, 56.0, true, paint_plus) {
+                    self.new_note();
+                }
+            });
     }
 
     fn cahier_dos(&mut self, ui: &mut Ui, meta: &crate::library::NoteMeta) -> Response {
@@ -708,22 +746,32 @@ impl CahierApp {
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
         let cloth = self.look.cloth_at(meta.cover);
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect.translate(vec2(4.0, 5.0)), 0.0, self.look.shadow);
-        painter.rect_filled(rect, 0.0, cloth);
+        let r = CornerRadius::same(22);
+        painter.rect_filled(rect.translate(vec2(4.0, 5.0)), r, self.look.shadow);
+        painter.rect_filled(rect, r, cloth);
         let spine = Rect::from_min_max(rect.min, pos2(rect.min.x + 16.0, rect.max.y));
-        painter.rect_filled(spine, 0.0, self.look.desk_deep.gamma_multiply(0.55));
+        painter.rect_filled(
+            spine,
+            CornerRadius {
+                nw: 22,
+                ne: 0,
+                sw: 22,
+                se: 0,
+            },
+            self.look.desk_deep.gamma_multiply(0.55),
+        );
         for y in [rect.min.y + 28.0, rect.center().y, rect.max.y - 28.0] {
             painter.circle_filled(pos2(rect.min.x + 8.0, y), 3.2, self.look.punch);
-            painter.circle_stroke(pos2(rect.min.x + 8.0, y), 3.2, Stroke::new(1.0, self.look.desk_deep));
+            painter.circle_stroke(pos2(rect.min.x + 8.0, y), 3.2, Stroke::new(1.0_f32, self.look.desk_deep));
         }
         let inner = Rect::from_min_max(
             pos2(rect.min.x + 22.0, rect.min.y + 18.0),
             pos2(rect.max.x - 12.0, rect.max.y - 18.0),
         );
-        painter.rect_filled(inner, 0.0, self.look.paper);
+        painter.rect_filled(inner, CornerRadius::same(14), self.look.paper);
         painter.line_segment(
             [pos2(inner.min.x + 8.0, inner.min.y + 36.0), pos2(inner.max.x - 8.0, inner.min.y + 38.0)],
-            Stroke::new(1.4, self.look.ink.gamma_multiply(0.55)),
+            Stroke::new(1.4_f32, self.look.ink.gamma_multiply(0.55)),
         );
         painter.text(
             pos2(inner.min.x + 10.0, inner.min.y + 48.0),
@@ -744,7 +792,7 @@ impl CahierApp {
             painter.circle_filled(pos2(rect.max.x - 18.0, rect.min.y + 16.0), 4.0, self.look.accent);
         }
         if resp.hovered() {
-            painter.rect_stroke(rect, 0.0, Stroke::new(1.5, self.look.accent), StrokeKind::Outside);
+            painter.rect_stroke(rect, r, Stroke::new(1.5_f32, self.look.accent), StrokeKind::Outside);
         }
         resp
     }
@@ -764,7 +812,7 @@ impl CahierApp {
         } else {
             self.look.desk_deep
         };
-        ui.painter().rect_filled(rect, 0.0, fill);
+        ui.painter().rect_filled(rect, CornerRadius::same(17), fill);
         ui.painter().text(
             rect.center(),
             Align2::CENTER_CENTER,
@@ -775,26 +823,63 @@ impl CahierApp {
         resp.clicked()
     }
 
+    fn round_action(
+        &self,
+        ui: &mut Ui,
+        size: f32,
+        accent: bool,
+        paint: impl FnOnce(&Painter, Pos2, Color32),
+    ) -> bool {
+        self.round_well(ui, size, accent, paint).clicked()
+    }
+
+    fn round_well(
+        &self,
+        ui: &mut Ui,
+        size: f32,
+        accent: bool,
+        paint: impl FnOnce(&Painter, Pos2, Color32),
+    ) -> Response {
+        let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+        let fill = if accent {
+            self.look.accent
+        } else if resp.hovered() {
+            self.look.desk_edge
+        } else {
+            Color32::TRANSPARENT
+        };
+        let fg = if accent {
+            self.look.desk_deep
+        } else {
+            self.look.fg
+        };
+        let p = ui.painter();
+        if fill.a() > 0 {
+            p.circle_filled(rect.center(), size * 0.46, fill);
+        }
+        paint(p, rect.center(), fg);
+        resp.on_hover_cursor(CursorIcon::PointingHand)
+    }
+
     fn ui_desk(&mut self, ctx: &Context) {
         self.handle_drops_and_paste(ctx);
 
         TopBottomPanel::top("rule")
-            .exact_height(52.0)
-            .frame(Frame::NONE.fill(self.look.desk_deep))
+            .exact_height(44.0)
+            .show_separator_line(false)
+            .frame(Frame::NONE.fill(self.look.desk))
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.add_space(10.0);
-                    if self.objet_btn(ui, "étagère", false) {
+                    ui.add_space(6.0);
+                    if self
+                        .round_well(ui, 40.0, false, paint_back)
+                        .on_hover_text("étagère")
+                        .clicked()
+                    {
                         self.close_desk();
                         return;
                     }
-                    ui.add_space(12.0);
-                    ui.painter().vline(
-                        ui.cursor().left() + 4.0,
-                        Rangef::new(ui.max_rect().min.y + 10.0, ui.max_rect().max.y - 10.0),
-                        Stroke::new(1.0, self.look.muted),
-                    );
-                    ui.add_space(16.0);
+                    ui.add_space(6.0);
                     let te = TextEdit::singleline(&mut self.title_buf)
                         .font(self.look.serif(20.0))
                         .desired_width(280.0)
@@ -806,29 +891,65 @@ impl CahierApp {
                         }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.add_space(12.0);
-                        if self.objet_btn(ui, "pdf", false) {
-                            self.export_pdf(ctx);
+                        ui.add_space(8.0);
+                        let more = self
+                            .round_well(ui, 36.0, false, paint_more)
+                            .on_hover_text("plus");
+                        let mut act = None;
+                        Popup::menu(&more).show(|ui| {
+                            ui.set_min_width(128.0);
+                            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                            if self.objet_btn(ui, "png", false) {
+                                act = Some(0);
+                            }
+                            if self.objet_btn(ui, "pdf", false) {
+                                act = Some(1);
+                            }
+                            if self.objet_btn(
+                                ui,
+                                if self.stylus_only {
+                                    "stylet · on"
+                                } else {
+                                    "stylet"
+                                },
+                                self.stylus_only,
+                            ) {
+                                act = Some(2);
+                            }
+                        });
+                        match act {
+                            Some(0) => self.export_png(ctx),
+                            Some(1) => self.export_pdf(ctx),
+                            Some(2) => self.stylus_only = !self.stylus_only,
+                            _ => {}
                         }
-                        if self.objet_btn(ui, "png", false) {
-                            self.export_png(ctx);
+                        if self
+                            .round_well(ui, 36.0, false, paint_fit)
+                            .on_hover_text("cadrer")
+                            .clicked()
+                        {
+                            self.need_fit = true;
                         }
-                        let paper_l = self
-                            .note
-                            .as_ref()
-                            .map(|n| n.paper.label())
-                            .unwrap_or("papier");
-                        if self.objet_btn(ui, paper_l, false) {
+                        if self
+                            .round_well(ui, 36.0, false, paint_paper_icon)
+                            .on_hover_text(
+                                self.note
+                                    .as_ref()
+                                    .map(|n| n.paper.label())
+                                    .unwrap_or("papier"),
+                            )
+                            .clicked()
+                        {
                             if let Some(n) = &mut self.note {
                                 n.paper = n.paper.cycle();
                                 self.mark_dirty();
                             }
                         }
-                        let z = format!("{}%", (self.camera.zoom * 100.0) as i32);
-                        if self.objet_btn(ui, &z, false) {
-                            self.need_fit = true;
-                        }
-                        if self.objet_btn(ui, "+ page", false) {
+                        if self
+                            .round_well(ui, 36.0, false, paint_plus)
+                            .on_hover_text("page")
+                            .clicked()
+                        {
                             self.push_snapshot();
                             if let Some(n) = &mut self.note {
                                 n.add_page();
@@ -839,184 +960,350 @@ impl CahierApp {
                 });
             });
 
-        SidePanel::left("trousse")
-            .exact_width(88.0)
-            .frame(Frame::NONE.fill(self.look.desk_deep))
-            .show(ctx, |ui| {
-                self.ui_trousse(ui);
-            });
-
         CentralPanel::default()
             .frame(Frame::NONE.fill(self.look.desk))
             .show(ctx, |ui| {
                 self.ui_canvas(ui);
             });
+
+        self.ui_floating_dock(ctx);
     }
 
-    fn ui_trousse(&mut self, ui: &mut Ui) {
-        ui.add_space(10.0);
-        ui.vertical_centered(|ui| {
-            ui.label(
-                RichText::new("trousse")
-                    .font(self.look.mono(10.0))
-                    .color(self.look.fg_dim),
-            );
+    fn ui_floating_dock(&mut self, ctx: &Context) {
+        let screen = ctx.screen_rect();
+        let vertical = self.dock_edge.vertical();
+        let mut area = Area::new(Id::new("cahier-dock"))
+            .order(Order::Foreground)
+            .interactable(true);
+        if let Some(pos) = self.dock_float {
+            let pos = pos.clamp(screen.min, pos2(screen.max.x - 48.0, screen.max.y - 48.0));
+            area = area.current_pos(pos);
+        } else {
+            let (align, off) = match self.dock_edge {
+                DockEdge::Bottom => (Align2::CENTER_BOTTOM, vec2(0.0, -12.0)),
+                DockEdge::Top => (Align2::CENTER_TOP, vec2(0.0, 50.0)),
+                DockEdge::Left => (Align2::LEFT_CENTER, vec2(10.0, 0.0)),
+                DockEdge::Right => (Align2::RIGHT_CENTER, vec2(-10.0, 0.0)),
+            };
+            area = area.anchor(align, off);
+        }
+        let inner = area.show(ctx, |ui| {
+            Frame::NONE
+                .fill(self.look.desk_deep)
+                .stroke(Stroke::new(1.0_f32, self.look.muted.gamma_multiply(0.38)))
+                .corner_radius(28)
+                .inner_margin(if vertical {
+                    Margin::symmetric(6, 10)
+                } else {
+                    Margin::symmetric(10, 6)
+                })
+                .show(ui, |ui| {
+                    if vertical {
+                        ui.set_max_height((screen.height() - 80.0).max(120.0));
+                        ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+                        ui.vertical(|ui| {
+                            self.dock_inner(ui, true);
+                        });
+                    } else {
+                        ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+                        ui.horizontal(|ui| {
+                            self.dock_inner(ui, false);
+                        });
+                    }
+                });
         });
-        ui.add_space(8.0);
-        let tools = [
+        ctx.data_mut(|d| d.insert_temp(Id::new("dock-rect"), inner.response.rect));
+        if self.dock_float.is_some() {
+            ctx.request_repaint();
+        }
+    }
+
+    fn dock_inner(&mut self, ui: &mut Ui, vertical: bool) {
+        let grip = self.dock_grip(ui, vertical);
+        if grip.drag_started() {
+            let bar = ui
+                .ctx()
+                .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+                .unwrap_or(grip.rect);
+            let pointer = grip.interact_pointer_pos().unwrap_or(bar.min);
+            self.dock_grab = pointer - bar.min;
+            self.dock_float = Some(bar.min);
+            self.dock_moved = false;
+        }
+        if grip.dragged() {
+            if grip.drag_delta().length() > 0.3 {
+                self.dock_moved = true;
+            }
+            if let Some(p) = grip.interact_pointer_pos() {
+                self.dock_float = Some(p - self.dock_grab);
+            }
+        }
+        if grip.drag_stopped() {
+            if self.dock_moved {
+                let p = grip
+                    .interact_pointer_pos()
+                    .or(self.dock_float)
+                    .unwrap_or_else(|| ui.ctx().screen_rect().center());
+                self.dock_edge = snap_dock(p, ui.ctx().screen_rect());
+                self.lib.index.dock = self.dock_edge;
+                self.lib.save_index();
+            }
+            self.dock_float = None;
+            self.dock_moved = false;
+        }
+
+        if self
+            .round_well(ui, 36.0, false, paint_undo)
+            .on_hover_text("annuler")
+            .clicked()
+        {
+            let mut ok = false;
+            if let Some(n) = &mut self.note {
+                ok = self.undo.undo(n);
+            }
+            if ok {
+                self.mark_dirty();
+            }
+        }
+        if self
+            .round_well(ui, 36.0, false, paint_redo)
+            .on_hover_text("rétablir")
+            .clicked()
+        {
+            let mut ok = false;
+            if let Some(n) = &mut self.note {
+                ok = self.undo.redo(n);
+            }
+            if ok {
+                self.mark_dirty();
+            }
+        }
+        self.dock_gap(ui, vertical);
+        for t in [
             Tool::Fineliner,
             Tool::Brush,
             Tool::Pencil,
             Tool::Highlighter,
-            Tool::EraserStroke,
-            Tool::EraserArea,
-            Tool::Lasso,
-            Tool::Text,
-            Tool::Image,
-        ];
-        for t in tools {
+        ] {
             if self.tool_glyph(ui, t) {
-                self.tool = t;
-                if let Some(nib) = t.nib() {
-                    self.width = default_width(nib);
+                if self.tool == t {
+                    self.width = next_width(self.width);
+                } else {
+                    self.tool = t;
+                    if let Some(nib) = t.nib() {
+                        self.width = default_width(nib);
+                    }
                 }
             }
         }
-        ui.add_space(10.0);
-        ui.vertical_centered(|ui| {
-            ui.label(
-                RichText::new("encre")
-                    .font(self.look.mono(10.0))
-                    .color(self.look.fg_dim),
-            );
-        });
-        let colors: Vec<Color32> = if self.tool == Tool::Highlighter {
-            self.look.highs.clone()
+        let erase_shown = if self.tool == Tool::EraserArea {
+            Tool::EraserArea
         } else {
-            self.look.inks.clone()
+            Tool::EraserStroke
         };
-        ui.add_space(4.0);
-        for (i, c) in colors.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.add_space(26.0);
-                let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 18.0), Sense::click());
-                ui.painter().rect_filled(rect, 0.0, *c);
-                if i == self.color_i % colors.len() {
-                    ui.painter()
-                        .rect_stroke(rect, 0.0, Stroke::new(1.5, self.look.fg), StrokeKind::Outside);
-                }
-                if resp.clicked() {
+        if self.tool_glyph(ui, erase_shown) {
+            if self.tool.is_eraser() {
+                self.tool = if self.tool == Tool::EraserStroke {
+                    Tool::EraserArea
+                } else {
+                    Tool::EraserStroke
+                };
+            } else {
+                self.tool = Tool::EraserStroke;
+            }
+        }
+        if self.tool_glyph(ui, Tool::Lasso) {
+            self.tool = Tool::Lasso;
+        }
+        self.dock_gap(ui, vertical);
+        let high = self.tool == Tool::Highlighter;
+        if high {
+            let n = self.look.highs.len();
+            for (i, c) in self.look.highs.iter().take(5).enumerate() {
+                let swatch = Color32::from_rgb(c.r(), c.g(), c.b());
+                if self.color_dot(ui, swatch, i == self.color_i % n, vertical) {
                     self.color_i = i;
                 }
-            });
-            ui.add_space(3.0);
-        }
-        ui.add_space(8.0);
-        ui.vertical_centered(|ui| {
-            ui.label(
-                RichText::new(format!("{:.1} mm", self.width * 0.26))
-                    .font(self.look.mono(10.0))
-                    .color(self.look.fg_dim),
-            );
-        });
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.add_space(18.0);
-            if self.objet_btn(ui, if self.stylus_only { "stylet" } else { "main" }, false) {
-                self.stylus_only = !self.stylus_only;
             }
-        });
+        } else {
+            const DOTS: [usize; 5] = [0, 2, 4, 5, 7];
+            for &i in &DOTS {
+                let Some(c) = self.look.inks.get(i).copied() else {
+                    continue;
+                };
+                if self.color_dot(ui, c, self.color_i == i, vertical) {
+                    self.color_i = i;
+                }
+            }
+        }
+        if self.tool.is_ink() || self.tool.is_eraser() {
+            ui.add_space(6.0);
+            for &(w, r) in &[(2.2_f32, 3.0), (5.0, 4.4), (11.0, 6.0)] {
+                let on = (self.width - w).abs() < 1.6;
+                if self.thick_dot(ui, r, on, vertical) {
+                    self.width = w;
+                }
+            }
+        }
+        self.dock_gap(ui, vertical);
+        if self.tool_glyph(ui, Tool::Text) {
+            self.tool = Tool::Text;
+        }
+        if self.tool_glyph(ui, Tool::Image) {
+            self.tool = Tool::Image;
+        }
+    }
+
+    fn dock_grip(&self, ui: &mut Ui, vertical: bool) -> Response {
+        let size = if vertical {
+            vec2(38.0, 18.0)
+        } else {
+            vec2(18.0, 38.0)
+        };
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
+        let p = ui.painter();
+        let c = rect.center();
+        let fg = self.look.fg.gamma_multiply(0.55);
+        if vertical {
+            for i in 0..3 {
+                let x = c.x - 6.0 + i as f32 * 6.0;
+                p.circle_filled(pos2(x, c.y - 2.4), 1.55, fg);
+                p.circle_filled(pos2(x, c.y + 2.4), 1.55, fg);
+            }
+        } else {
+            for i in 0..3 {
+                let y = c.y - 6.0 + i as f32 * 6.0;
+                p.circle_filled(pos2(c.x - 2.4, y), 1.55, fg);
+                p.circle_filled(pos2(c.x + 2.4, y), 1.55, fg);
+            }
+        }
+        let cursor = if resp.dragged() {
+            CursorIcon::Grabbing
+        } else {
+            CursorIcon::Grab
+        };
+        resp.on_hover_cursor(cursor)
+            .on_hover_text("glisser la trousse")
+    }
+
+    fn dock_gap(&self, ui: &mut Ui, vertical: bool) {
+        if vertical {
+            ui.add_space(4.0);
+            let (rect, _) = ui.allocate_exact_size(vec2(22.0, 2.0), Sense::hover());
+            ui.painter().line_segment(
+                [
+                    pos2(rect.min.x + 1.0, rect.center().y),
+                    pos2(rect.max.x - 1.0, rect.center().y),
+                ],
+                Stroke::new(1.0_f32, self.look.muted.gamma_multiply(0.55)),
+            );
+            ui.add_space(4.0);
+        } else {
+            ui.add_space(4.0);
+            let (rect, _) = ui.allocate_exact_size(vec2(2.0, 18.0), Sense::hover());
+            ui.painter().line_segment(
+                [
+                    pos2(rect.center().x, rect.min.y + 1.0),
+                    pos2(rect.center().x, rect.max.y - 1.0),
+                ],
+                Stroke::new(1.0_f32, self.look.muted.gamma_multiply(0.55)),
+            );
+            ui.add_space(4.0);
+        }
+    }
+
+    fn color_dot(&self, ui: &mut Ui, color: Color32, on: bool, vertical: bool) -> bool {
+        let size = if vertical {
+            vec2(38.0, 26.0)
+        } else {
+            vec2(28.0, 38.0)
+        };
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        let c = rect.center();
+        let p = ui.painter();
+        let r = if on { 8.4 } else { 7.2 };
+        p.circle_filled(c, r + 1.4, self.look.fg.gamma_multiply(0.55));
+        p.circle_filled(c, r, color);
+        p.circle_stroke(
+            c,
+            r,
+            Stroke::new(1.05_f32, self.look.fg.gamma_multiply(0.55)),
+        );
+        if on {
+            p.circle_stroke(c, r + 3.8, Stroke::new(1.7_f32, self.look.fg));
+        }
+        resp.on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("encre")
+            .clicked()
+    }
+
+    fn thick_dot(&self, ui: &mut Ui, r: f32, on: bool, vertical: bool) -> bool {
+        let size = if vertical {
+            vec2(38.0, 22.0)
+        } else {
+            vec2(20.0, 38.0)
+        };
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        let c = rect.center();
+        let p = ui.painter();
+        let fill = if on {
+            self.ink_color()
+        } else {
+            self.look.fg.gamma_multiply(0.42)
+        };
+        p.circle_filled(c, r, fill);
+        resp.on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("épaisseur")
+            .clicked()
     }
 
     fn tool_glyph(&self, ui: &mut Ui, tool: Tool) -> bool {
-        ui.horizontal(|ui| {
-            ui.add_space(18.0);
-            let (rect, resp) = ui.allocate_exact_size(vec2(52.0, 36.0), Sense::click());
-            let active = self.tool == tool;
-            let bg = if active {
-                self.look.accent
-            } else if resp.hovered() {
-                self.look.desk_edge
-            } else {
-                self.look.desk
-            };
-            let fg = if active {
-                self.look.desk_deep
-            } else {
-                self.look.fg
-            };
-            let p = ui.painter();
-            p.rect_filled(rect, 0.0, bg);
-            let c = rect.center();
-            match tool {
-                Tool::Fineliner => {
-                    p.line_segment([pos2(c.x - 10.0, c.y + 8.0), pos2(c.x + 12.0, c.y - 8.0)], Stroke::new(2.0, fg));
-                    p.circle_filled(pos2(c.x + 12.0, c.y - 8.0), 2.0, fg);
-                }
-                Tool::Brush => {
-                    p.add(Shape::convex_polygon(
-                        vec![
-                            pos2(c.x - 8.0, c.y + 10.0),
-                            pos2(c.x - 2.0, c.y - 10.0),
-                            pos2(c.x + 4.0, c.y - 10.0),
-                            pos2(c.x + 10.0, c.y + 10.0),
-                        ],
-                        fg,
-                        Stroke::NONE,
-                    ));
-                }
-                Tool::Pencil => {
-                    p.add(Shape::convex_polygon(
-                        vec![
-                            pos2(c.x - 12.0, c.y + 8.0),
-                            pos2(c.x + 6.0, c.y - 10.0),
-                            pos2(c.x + 12.0, c.y - 6.0),
-                            pos2(c.x - 6.0, c.y + 12.0),
-                        ],
-                        fg,
-                        Stroke::NONE,
-                    ));
-                }
-                Tool::Highlighter => {
-                    p.rect_filled(
-                        Rect::from_center_size(c, vec2(22.0, 10.0)),
-                        0.0,
-                        fg.gamma_multiply(0.55),
-                    );
-                }
-                Tool::EraserStroke => {
-                    p.rect_filled(Rect::from_center_size(c, vec2(18.0, 12.0)), 2.0, fg);
-                }
-                Tool::EraserArea => {
-                    p.circle_stroke(c, 10.0, Stroke::new(1.6, fg));
-                }
-                Tool::Lasso => {
-                    p.circle_stroke(c, 9.0, Stroke::new(1.4, fg));
-                    p.line_segment([pos2(c.x + 6.0, c.y + 6.0), pos2(c.x + 12.0, c.y + 12.0)], Stroke::new(1.4, fg));
-                }
-                Tool::Text => {
-                    p.text(c, Align2::CENTER_CENTER, "Aa", self.look.serif(16.0), fg);
-                }
-                Tool::Image => {
-                    p.rect_stroke(
-                        Rect::from_center_size(c, vec2(20.0, 14.0)),
-                        0.0,
-                        Stroke::new(1.4, fg),
-                        StrokeKind::Inside,
-                    );
-                    p.circle_filled(pos2(c.x - 4.0, c.y - 2.0), 2.0, fg);
-                }
-            }
-            resp.on_hover_text(tool.label()).clicked()
-        })
-        .inner
+        let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 38.0), Sense::click());
+        let active = self.tool == tool
+            || (tool.is_eraser() && self.tool.is_eraser());
+        let bg = if active {
+            self.look.accent
+        } else if resp.hovered() {
+            self.look.desk_edge
+        } else {
+            Color32::TRANSPARENT
+        };
+        let fg = if active {
+            self.look.desk_deep
+        } else {
+            self.look.fg
+        };
+        let p = ui.painter();
+        let c = rect.center();
+        if bg.a() > 0 {
+            p.circle_filled(c, 16.5, bg);
+        }
+        paint_tool(p, tool, c, fg);
+        resp.on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text(tool.label())
+            .clicked()
     }
 
     fn ui_canvas(&mut self, ui: &mut Ui) {
         let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let rect = resp.rect;
-        if self.need_fit && rect.width() > 10.0 {
-            self.camera.fit_page(rect, 0);
+        let resized = (rect.size() - self.last_canvas).length() > 6.0;
+        if (self.need_fit || resized) && rect.width() > 10.0 {
+            self.last_canvas = rect.size();
+            if let Some(n) = &mut self.note {
+                if n.grow_to_view(vec2(
+                    (rect.width() - 16.0).max(120.0),
+                    (rect.height() - 16.0).max(160.0),
+                )) {
+                    self.mark_dirty();
+                }
+            }
+            let (pw, ph) = self
+                .note
+                .as_ref()
+                .map(|n| n.page_size())
+                .unwrap_or((PAGE_W, PAGE_H));
+            self.camera.fit_page(rect, 0, pw, ph);
             self.need_fit = false;
         }
 
@@ -1067,45 +1354,97 @@ impl CahierApp {
         }
     }
 
-    fn pointer_ok(&self, ui: &Ui) -> bool {
-        if !self.stylus_only {
-            return true;
-        }
-        ui.input(|i| {
-            i.events.iter().any(|e| matches!(e, Event::Touch { force: Some(_), .. }))
-        })
-    }
-
     fn handle_tool(&mut self, ui: &Ui, resp: &Response, rect: Rect) {
         let space = ui.input(|i| i.key_down(Key::Space));
         if space || ui.input(|i| i.pointer.middle_down()) {
             return;
         }
         let shift = ui.input(|i| i.modifiers.shift);
-        let secondary = ui.input(|i| i.pointer.secondary_down());
-        let mut tool = self.tool;
-        if secondary {
-            tool = Tool::EraserStroke;
-        }
-        let pos = resp.interact_pointer_pos().or_else(|| resp.hover_pos());
-        let Some(screen) = pos else {
+        let pen = self.tablet.snapshot();
+        let pen_ink =
+            pen.down || pen.pressed || pen.released || (self.live.is_some() && self.live_from_pen);
+        if self.stylus_only && !pen_ink && self.live.is_none() {
             return;
-        };
-        if !rect.contains(screen) {
+        }
+
+        let time = ui.input(|i| i.time);
+        let extra: Vec<Pos2>;
+        let (screen, primary_down, primary_pressed, primary_released, secondary) =
+            if pen_ink {
+                if let Some(screen) = pen.pos {
+                    extra = pen.samples;
+                    (
+                        screen,
+                        pen.down,
+                        pen.pressed,
+                        pen.released,
+                        pen.eraser,
+                    )
+                } else {
+                    if self.live.is_some() && self.live_from_pen && (pen.released || !pen.down) {
+                        self.finish_live(shift, time);
+                    }
+                    return;
+                }
+            } else {
+                let pos = resp.interact_pointer_pos().or_else(|| resp.hover_pos());
+                let Some(screen) = pos else {
+                    return;
+                };
+                extra = ui.input(|i| {
+                    i.events
+                        .iter()
+                        .filter_map(|e| match e {
+                            Event::PointerMoved(sp) => Some(*sp),
+                            Event::Touch {
+                                phase: TouchPhase::Move | TouchPhase::Start,
+                                pos,
+                                ..
+                            } => Some(*pos),
+                            _ => None,
+                        })
+                        .collect()
+                });
+                (
+                    screen,
+                    ui.input(|i| i.pointer.primary_down()),
+                    ui.input(|i| i.pointer.primary_pressed()),
+                    ui.input(|i| i.pointer.primary_released()),
+                    ui.input(|i| i.pointer.secondary_down()),
+                )
+            };
+
+        if !rect.contains(screen) && !(self.live.is_some() && (primary_released || !primary_down)) {
+            return;
+        }
+        if ui.ctx().data(|d| {
+            d.get_temp::<Rect>(Id::new("dock-rect"))
+                .map(|r| r.expand(4.0).contains(screen))
+                .unwrap_or(false)
+        }) {
+            if self.live.is_some() && (primary_released || !primary_down) {
+                self.finish_live(shift, time);
+            }
             return;
         }
         let paper = self.camera.to_paper(screen, rect);
         let n_pages = self.note.as_ref().map(|n| n.pages.len()).unwrap_or(1);
-        let page = page_at_y(paper.y, n_pages);
-        let local = paper - page_origin(page);
+        let page = page_at_y(paper.y, n_pages, self.ph());
+        let local = paper - page_origin(page, self.ph());
 
-        if tool.is_ink() && self.pointer_ok(ui) && ui.input(|i| i.pointer.primary_down()) && !resp.dragged_by(PointerButton::Middle) {
-            if self.live.is_none() && ui.input(|i| i.pointer.primary_pressed()) {
+        let mut tool = self.tool;
+        if secondary {
+            tool = Tool::EraserStroke;
+        }
+
+        if tool.is_ink() && (primary_down || primary_pressed) && !resp.dragged_by(PointerButton::Middle) {
+            if self.live.is_none() {
                 self.push_snapshot();
                 let nib = tool.nib().unwrap();
                 let mut s = InkStroke::new(nib, self.ink_color(), self.width);
                 s.push(InkPoint::new(local, 0.7));
                 self.live = Some((page, s));
+                self.live_from_pen = pen_ink;
             }
             let speed = self.speed(local);
             let hw = self.pressure.latest();
@@ -1115,40 +1454,26 @@ impl CahierApp {
                     s.push(InkPoint::new(local, pr));
                 }
             }
-            // extra samples
+            let cam = self.camera;
+            let ph = self.ph();
+            let pressure = self.pressure.latest();
             if let Some((pgi, live)) = &mut self.live {
-                ui.input(|i| {
-                    for ev in &i.events {
-                        if let Event::PointerMoved(sp) = ev {
-                            let pp = self.camera.to_paper(*sp, rect);
-                            if page_at_y(pp.y, n_pages) == *pgi {
-                                let loc = pp - page_origin(*pgi);
-                                live.push(InkPoint::new(loc, mixed_pressure(live.nib, self.pressure.latest(), 200.0)));
-                            }
-                        }
+                for sp in &extra {
+                    let pp = cam.to_paper(*sp, rect);
+                    if page_at_y(pp.y, n_pages, ph) == *pgi {
+                        let loc = pp - page_origin(*pgi, ph);
+                        live.push(InkPoint::new(loc, mixed_pressure(live.nib, pressure, 200.0)));
                     }
-                });
-            }
-        } else if self.live.is_some() && ui.input(|i| i.pointer.primary_released() || !i.pointer.primary_down()) {
-            if let Some((p, mut s)) = self.live.take() {
-                if let Some(snapped) = maybe_snap_shape(&s, shift) {
-                    s = snapped;
-                    let t = ui.input(|i| i.time);
-                    self.toast("forme", t);
-                }
-                if s.points.len() >= 1 {
-                    if let Some(n) = &mut self.note {
-                        if let Some(page) = n.pages.get_mut(p) {
-                            page.strokes.push(s);
-                        }
-                    }
-                    self.mark_dirty();
                 }
             }
         }
+        if self.live.is_some() && (primary_released || !primary_down) && !(tool.is_ink() && primary_down) {
+            self.finish_live(shift, time);
+        }
 
-        if tool.is_eraser() && ui.input(|i| i.pointer.primary_down() || i.pointer.secondary_down()) {
-            if ui.input(|i| i.pointer.primary_pressed() || i.pointer.secondary_pressed()) {
+        if tool.is_eraser() && (primary_down || secondary) {
+            if primary_pressed || ui.input(|i| i.pointer.secondary_pressed()) || (pen_ink && pen.pressed && secondary)
+            {
                 self.push_snapshot();
             }
             let r = if tool == Tool::EraserArea {
@@ -1192,10 +1517,7 @@ impl CahierApp {
         }
 
         if tool == Tool::Lasso {
-            let pressed = ui.input(|i| i.pointer.primary_pressed());
-            let down = ui.input(|i| i.pointer.primary_down());
-            let released = ui.input(|i| i.pointer.primary_released());
-            if pressed {
+            if primary_pressed {
                 if self.sel_contains(paper) {
                     self.push_snapshot();
                     self.drag_last = Some(paper);
@@ -1206,7 +1528,7 @@ impl CahierApp {
                     self.lasso.push(paper);
                     self.drag_last = None;
                 }
-            } else if down {
+            } else if primary_down {
                 if let Some(last) = self.drag_last {
                     let d = paper - last;
                     self.translate_sel(d);
@@ -1215,18 +1537,19 @@ impl CahierApp {
                 } else if self.lasso.last().map(|p| p.distance(paper) > 2.0).unwrap_or(true) {
                     self.lasso.push(paper);
                 }
-            } else if released {
+            } else if primary_released {
                 self.drag_last = None;
                 if self.lasso.len() > 2 {
                     self.sel = self.hits_lasso();
                     self.lasso.clear();
                 }
             }
-        } else if !ui.input(|i| i.pointer.primary_down()) {
+        } else if !primary_down {
             self.drag_last = None;
         }
 
-        if tool == Tool::Text && resp.clicked() {
+        let tap = resp.clicked() || (pen_ink && primary_pressed);
+        if tool == Tool::Text && tap {
             if let Some((pg, id)) = self.hit_text(page, local) {
                 self.editing_text = Some((pg, id));
             } else {
@@ -1243,8 +1566,26 @@ impl CahierApp {
             }
         }
 
-        if tool == Tool::Image && resp.clicked() {
+        if tool == Tool::Image && tap {
             self.pick_image(page, local);
+        }
+    }
+
+    fn finish_live(&mut self, shift: bool, time: f64) {
+        self.live_from_pen = false;
+        if let Some((p, mut s)) = self.live.take() {
+            if let Some(snapped) = maybe_snap_shape(&s, shift) {
+                s = snapped;
+                self.toast("forme", time);
+            }
+            if !s.points.is_empty() {
+                if let Some(n) = &mut self.note {
+                    if let Some(page) = n.pages.get_mut(p) {
+                        page.strokes.push(s);
+                    }
+                }
+                self.mark_dirty();
+            }
         }
     }
 
@@ -1268,7 +1609,7 @@ impl CahierApp {
             let Some(page) = n.pages.get(s.page) else {
                 continue;
             };
-            let o = page_origin(s.page);
+            let o = page_origin(s.page, self.ph());
             let hit = match s.kind {
                 SelKind::Stroke => page
                     .strokes
@@ -1304,7 +1645,7 @@ impl CahierApp {
             return out;
         };
         for (pi, page) in n.pages.iter().enumerate() {
-            let o = page_origin(pi);
+            let o = page_origin(pi, self.ph());
             for s in &page.strokes {
                 let world: Vec<Pos2> = s.points.iter().map(|p| p.pos() + o).collect();
                 if world.iter().any(|p| crate::ink::point_in_poly(*p, poly)) {
@@ -1464,17 +1805,17 @@ impl CahierApp {
         let cam = self.camera;
         let map = |p: Pos2| cam.to_screen(p, rect);
         for (pi, page) in note.pages.iter().enumerate() {
-            let origin = page_origin(pi);
+            let origin = page_origin(pi, note.page_h);
             let min = map(Pos2::new(origin.x, origin.y));
-            let max = map(Pos2::new(origin.x + PAGE_W, origin.y + PAGE_H));
+            let max = map(Pos2::new(origin.x + note.page_w, origin.y + note.page_h));
             let paper = Rect::from_min_max(min, max);
-            painter.rect_filled(paper.translate(vec2(8.0, 10.0)), 0.0, self.look.shadow);
+            painter.rect_filled(paper.translate(vec2(8.0, 10.0)), CornerRadius::same(22), self.look.shadow);
             let fill = if note.paper == PaperKind::Slate {
                 self.look.desk_deep
             } else {
                 self.look.paper
             };
-            painter.rect_filled(paper, 0.0, fill);
+            painter.rect_filled(paper, CornerRadius::same(22), fill);
             self.paint_template(painter, paper, note.paper, cam.zoom);
             self.paint_punches(painter, paper);
             let fold = [
@@ -1538,8 +1879,13 @@ impl CahierApp {
             );
         }
 
+        let ph = self
+            .note
+            .as_ref()
+            .map(|n| n.page_h.max(1.0))
+            .unwrap_or(PAGE_H);
         if let Some((pi, live)) = &mut self.live {
-            let origin = page_origin(*pi);
+            let origin = page_origin(*pi, ph);
             let mesh = live.tessellate().clone();
             painter.add(Shape::mesh(map_mesh(&mesh, |p| map(p + origin))));
         }
@@ -1550,7 +1896,7 @@ impl CahierApp {
         for s in &self.sel {
             if let Some(n) = &self.note {
                 if let Some(page) = n.pages.get(s.page) {
-                    let o = page_origin(s.page);
+                    let o = page_origin(s.page, self.ph());
                     let bb = match s.kind {
                         SelKind::Stroke => page.strokes.iter().find(|x| x.id == s.id).and_then(|st| st.bbox()),
                         SelKind::Text => page.texts.iter().find(|x| x.id == s.id).map(|t| {
@@ -1568,12 +1914,6 @@ impl CahierApp {
                 }
             }
         }
-
-        if note.pages.len() == note.pages.len() {
-            // keep used
-        }
-        let gap_y = map(pos2(0.0, note.pages.len() as f32 * (PAGE_H + PAGE_GAP) - PAGE_GAP + 12.0));
-        let _ = gap_y;
     }
 
     fn paint_template(&self, painter: &Painter, paper: Rect, kind: PaperKind, zoom: f32) {
@@ -1679,7 +2019,7 @@ impl CahierApp {
             if let Some(note) = &mut self.note {
                 if let Some(page) = note.pages.get_mut(pg) {
                     if let Some(tx) = page.texts.iter_mut().find(|t| t.id == id) {
-                        let origin = page_origin(pg);
+                        let origin = page_origin(pg, note.page_h.max(1.0));
                         let min = cam.to_screen(tx.min() + origin, rect);
                         let size = vec2(tx.size[0] * cam.zoom, tx.size[1] * cam.zoom);
                         let size_pt = tx.size_pt;
@@ -1708,20 +2048,7 @@ impl CahierApp {
             self.dirty = true;
             self.last_change = Instant::now();
         }
-        // légende d'atelier
-        let msg = format!(
-            "{}  ·  {:.1} mm  ·  {}",
-            self.tool.label(),
-            self.width * 0.26,
-            self.look.name.to_lowercase()
-        );
-        painter.text(
-            pos2(rect.min.x + 16.0, rect.max.y - 18.0),
-            Align2::LEFT_BOTTOM,
-            msg,
-            self.look.mono(11.0),
-            self.look.fg_dim,
-        );
+        let _ = (ui, painter, rect);
     }
 
     fn cursor_for_tool(&self, ui: &Ui, resp: &Response) {
@@ -1795,6 +2122,23 @@ impl CahierApp {
     }
 }
 
+fn snap_dock(pos: Pos2, screen: Rect) -> DockEdge {
+    let dl = (pos.x - screen.left()).abs();
+    let dr = (pos.x - screen.right()).abs();
+    let dt = (pos.y - screen.top()).abs();
+    let db = (pos.y - screen.bottom()).abs();
+    let m = dl.min(dr).min(dt).min(db);
+    if m == dt {
+        DockEdge::Top
+    } else if m == db {
+        DockEdge::Bottom
+    } else if m == dl {
+        DockEdge::Left
+    } else {
+        DockEdge::Right
+    }
+}
+
 fn slug(s: &str) -> String {
     let s: String = s
         .chars()
@@ -1808,4 +2152,239 @@ fn slug(s: &str) -> String {
         .collect();
     let s = s.trim_matches('-').to_string();
     if s.is_empty() { "cahier".into() } else { s }
+}
+
+fn next_width(w: f32) -> f32 {
+    const WIDTHS: [f32; 3] = [2.2, 5.0, 11.0];
+    let i = WIDTHS
+        .iter()
+        .position(|&p| (w - p).abs() < 1.6)
+        .unwrap_or(0);
+    WIDTHS[(i + 1) % WIDTHS.len()]
+}
+
+fn polar(c: Pos2, ang: f32, r: f32) -> Pos2 {
+    pos2(c.x + ang.cos() * r, c.y + ang.sin() * r)
+}
+
+fn shaft(p: &egui::Painter, a: Pos2, b: Pos2, thick: f32, col: Color32) {
+    p.line_segment([a, b], Stroke::new(thick, col));
+    p.circle_filled(a, thick * 0.48, col);
+    p.circle_filled(b, thick * 0.48, col);
+}
+
+fn paint_plus(p: &egui::Painter, c: Pos2, fg: Color32) {
+    p.rect_filled(Rect::from_center_size(c, vec2(16.0, 3.0)), 2.0, fg);
+    p.rect_filled(Rect::from_center_size(c, vec2(3.0, 16.0)), 2.0, fg);
+}
+
+fn paint_back(p: &egui::Painter, c: Pos2, fg: Color32) {
+    let st = Stroke::new(2.15_f32, fg);
+    p.line_segment([pos2(c.x + 3.5, c.y - 7.2), pos2(c.x - 6.5, c.y)], st);
+    p.line_segment([pos2(c.x - 6.5, c.y), pos2(c.x + 3.5, c.y + 7.2)], st);
+    p.circle_filled(pos2(c.x - 6.5, c.y), 1.1, fg);
+}
+
+fn paint_more(p: &egui::Painter, c: Pos2, fg: Color32) {
+    for dy in [-6.2, 0.0, 6.2] {
+        p.circle_filled(pos2(c.x, c.y + dy), 1.7, fg);
+    }
+}
+
+fn paint_fit(p: &egui::Painter, c: Pos2, fg: Color32) {
+    let st = Stroke::new(1.8_f32, fg);
+    let s = 6.4;
+    let m = 2.2;
+    p.line_segment([pos2(c.x - s, c.y - m), pos2(c.x - s, c.y - s)], st);
+    p.line_segment([pos2(c.x - s, c.y - s), pos2(c.x - m, c.y - s)], st);
+    p.line_segment([pos2(c.x + s, c.y - m), pos2(c.x + s, c.y - s)], st);
+    p.line_segment([pos2(c.x + s, c.y - s), pos2(c.x + m, c.y - s)], st);
+    p.line_segment([pos2(c.x - s, c.y + m), pos2(c.x - s, c.y + s)], st);
+    p.line_segment([pos2(c.x - s, c.y + s), pos2(c.x - m, c.y + s)], st);
+    p.line_segment([pos2(c.x + s, c.y + m), pos2(c.x + s, c.y + s)], st);
+    p.line_segment([pos2(c.x + s, c.y + s), pos2(c.x + m, c.y + s)], st);
+}
+
+fn paint_paper_icon(p: &egui::Painter, c: Pos2, fg: Color32) {
+    p.rect_stroke(
+        Rect::from_center_size(c, vec2(12.5, 15.5)),
+        3.6,
+        Stroke::new(1.6_f32, fg),
+        StrokeKind::Inside,
+    );
+    for dy in [-3.2, 0.0, 3.2] {
+        p.line_segment(
+            [pos2(c.x - 3.6, c.y + dy), pos2(c.x + 3.6, c.y + dy)],
+            Stroke::new(1.35_f32, fg),
+        );
+    }
+}
+
+fn paint_curved_arrow(p: &egui::Painter, c: Pos2, fg: Color32, flip: f32) {
+    let mut pts = Vec::with_capacity(15);
+    let start = -2.55_f32;
+    let end = 0.42_f32;
+    let n = 14;
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        let a = start + (end - start) * t;
+        pts.push(pos2(
+            c.x + flip * a.cos() * 8.1,
+            c.y + a.sin() * 8.1 + 1.1,
+        ));
+    }
+    p.add(egui::Shape::line(pts.clone(), Stroke::new(2.1_f32, fg)));
+    if pts.len() >= 2 {
+        let tip = pts[0];
+        let nxt = pts[1];
+        let dir = (tip - nxt).normalized();
+        let nrm = vec2(-dir.y, dir.x);
+        p.add(egui::Shape::convex_polygon(
+            vec![
+                tip + dir * 1.1,
+                tip - dir * 5.4 + nrm * 4.0,
+                tip - dir * 5.4 - nrm * 4.0,
+            ],
+            fg,
+            Stroke::NONE,
+        ));
+    }
+}
+
+fn paint_undo(p: &egui::Painter, c: Pos2, fg: Color32) {
+    paint_curved_arrow(p, c, fg, 1.0);
+}
+
+fn paint_redo(p: &egui::Painter, c: Pos2, fg: Color32) {
+    paint_curved_arrow(p, c, fg, -1.0);
+}
+
+fn paint_tool(p: &egui::Painter, tool: Tool, c: Pos2, fg: Color32) {
+    let ang = -0.92_f32;
+    let pi = std::f32::consts::PI;
+    match tool {
+        Tool::Fineliner => {
+            let tip = polar(c, ang, 9.6);
+            let tail = polar(c, ang + pi, 8.0);
+            shaft(p, tail, tip, 3.2, fg);
+            p.circle_filled(tail, 2.3, fg);
+            let n = (tip - tail).normalized();
+            let side = vec2(-n.y, n.x);
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    tip + n * 3.4,
+                    tip - n * 0.2 + side * 2.2,
+                    tip - n * 0.2 - side * 2.2,
+                ],
+                fg,
+                Stroke::NONE,
+            ));
+        }
+        Tool::Brush => {
+            let tip = polar(c, ang, 8.8);
+            let tail = polar(c, ang + pi, 8.2);
+            shaft(p, tail, c, 2.5, fg);
+            p.circle_filled(tail, 1.8, fg);
+            p.circle_filled(c.lerp(tip, 0.15), 3.8, fg);
+            p.circle_filled(c.lerp(tip, 0.55), 5.4, fg);
+            p.circle_filled(tip, 3.6, fg);
+        }
+        Tool::Pencil => {
+            let tip = polar(c, ang, 10.2);
+            let tail = polar(c, ang + pi, 8.2);
+            shaft(p, tail.lerp(tip, 0.18), tail.lerp(tip, 0.68), 4.0, fg);
+            p.circle_filled(tail, 2.7, fg);
+            let n = (tip - tail).normalized();
+            let side = vec2(-n.y, n.x);
+            let base = tail.lerp(tip, 0.66);
+            p.add(egui::Shape::convex_polygon(
+                vec![tip, base + side * 2.4, base - side * 2.4],
+                fg,
+                Stroke::NONE,
+            ));
+        }
+        Tool::Highlighter => {
+            let dir = vec2(ang.cos(), ang.sin());
+            let nrm = vec2(-dir.y, dir.x);
+            let tail = c - dir * 7.4;
+            let mid = c + dir * 1.2;
+            let tip = c + dir * 8.6;
+            shaft(p, tail, mid, 6.6, fg);
+            p.circle_filled(tail, 3.1, fg);
+            let a = tip + nrm * 4.4;
+            let b = tip - nrm * 4.4;
+            p.line_segment([a, b], Stroke::new(3.4_f32, fg));
+            p.circle_filled(a, 1.7, fg);
+            p.circle_filled(b, 1.7, fg);
+            shaft(p, mid, tip, 5.2, fg);
+        }
+        Tool::EraserStroke => {
+            let a = polar(c, ang, 6.8);
+            let b = polar(c, ang + pi, 6.8);
+            shaft(p, a, b, 8.6, fg);
+        }
+        Tool::EraserArea => {
+            p.circle_stroke(c, 8.0, Stroke::new(1.8_f32, fg));
+            p.circle_filled(c, 2.1, fg);
+        }
+        Tool::Lasso => {
+            let n = 18;
+            let mut pts = Vec::with_capacity(n);
+            for i in 0..n {
+                let t = i as f32 / n as f32 * std::f32::consts::TAU;
+                pts.push(pos2(c.x + t.cos() * 7.6, c.y + t.sin() * 6.0 - 0.6));
+            }
+            for i in 0..n {
+                if i % 2 == 0 {
+                    p.line_segment(
+                        [pts[i], pts[(i + 1) % n]],
+                        Stroke::new(1.7_f32, fg),
+                    );
+                }
+            }
+            let h0 = pos2(c.x + 6.2, c.y + 3.4);
+            let h1 = pos2(c.x + 10.0, c.y + 7.2);
+            p.line_segment([h0, h1], Stroke::new(1.7_f32, fg));
+            p.circle_filled(h1, 1.6, fg);
+        }
+        Tool::Text => {
+            p.rect_filled(
+                Rect::from_center_size(pos2(c.x, c.y - 6.0), vec2(14.0, 2.5)),
+                1.4,
+                fg,
+            );
+            p.rect_filled(
+                Rect::from_center_size(pos2(c.x, c.y + 1.4), vec2(2.5, 14.0)),
+                1.4,
+                fg,
+            );
+            p.circle_filled(pos2(c.x - 7.0, c.y - 6.0), 1.35, fg);
+            p.circle_filled(pos2(c.x + 7.0, c.y - 6.0), 1.35, fg);
+            p.rect_filled(
+                Rect::from_center_size(pos2(c.x, c.y + 8.0), vec2(6.4, 2.1)),
+                1.1,
+                fg,
+            );
+        }
+        Tool::Image => {
+            p.rect_stroke(
+                Rect::from_center_size(c, vec2(16.5, 13.0)),
+                5.0,
+                Stroke::new(1.6_f32, fg),
+                StrokeKind::Inside,
+            );
+            p.circle_filled(pos2(c.x - 3.8, c.y - 2.5), 1.85, fg);
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    pos2(c.x - 7.2, c.y + 4.6),
+                    pos2(c.x - 1.6, c.y - 1.0),
+                    pos2(c.x + 2.1, c.y + 2.3),
+                    pos2(c.x + 4.0, c.y + 0.5),
+                    pos2(c.x + 7.4, c.y + 4.6),
+                ],
+                fg,
+                Stroke::NONE,
+            ));
+        }
+    }
 }

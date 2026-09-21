@@ -1,4 +1,4 @@
-use crate::document::{PAGE_GAP, PAGE_H, PAGE_W};
+use crate::document::PAGE_GAP;
 use egui::{Pos2, Rect, Vec2};
 
 #[derive(Clone, Copy, Debug)]
@@ -38,15 +38,15 @@ impl Camera {
         self.pan += screen - now;
     }
 
-    pub fn fit_page(&mut self, rect: Rect, page: usize) {
-        let margin = 48.0;
-        let z = ((rect.width() - margin * 2.0) / PAGE_W)
-            .min((rect.height() - margin * 2.0) / PAGE_H)
-            .clamp(0.2, 3.0);
+    pub fn fit_page(&mut self, rect: Rect, page: usize, page_w: f32, page_h: f32) {
+        let margin = 8.0;
+        let z = ((rect.width() - margin * 2.0) / page_w.max(1.0))
+            .min((rect.height() - margin * 2.0) / page_h.max(1.0))
+            .clamp(0.15, 8.0);
         self.zoom = z;
-        let origin_y = page as f32 * (PAGE_H + PAGE_GAP);
-        let pw = PAGE_W * z;
-        let ph = PAGE_H * z;
+        let origin_y = page as f32 * (page_h + PAGE_GAP);
+        let pw = page_w * z;
+        let ph = page_h * z;
         self.pan = Vec2::new(
             (rect.width() - pw) * 0.5,
             (rect.height() - ph) * 0.5 - origin_y * z,
@@ -54,14 +54,14 @@ impl Camera {
     }
 }
 
-pub fn page_origin(page: usize) -> Vec2 {
-    Vec2::new(0.0, page as f32 * (PAGE_H + PAGE_GAP))
+pub fn page_origin(page: usize, page_h: f32) -> Vec2 {
+    Vec2::new(0.0, page as f32 * (page_h + PAGE_GAP))
 }
 
-pub fn page_at_y(y: f32, pages: usize) -> usize {
+pub fn page_at_y(y: f32, pages: usize, page_h: f32) -> usize {
     if pages == 0 {
         return 0;
     }
-    let stride = PAGE_H + PAGE_GAP;
+    let stride = page_h + PAGE_GAP;
     ((y / stride).floor() as i32).clamp(0, pages as i32 - 1) as usize
 }

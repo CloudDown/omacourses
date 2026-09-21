@@ -28,4 +28,8 @@ impl Pressure {
             self.bits.store(force.to_bits(), Ordering::Relaxed);
         }
     }
+
+    pub fn clear(&self) {
+        self.bits.store(0, Ordering::Relaxed);
+    }
 }
