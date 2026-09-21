@@ -10,8 +10,8 @@ use crate::camera::{page_at_y, page_origin, Camera, ZOOM_STOPS};
 use crate::document::{ImageObj, Note, PaperKind, TextBox, PAGE_H, PAGE_W};
 use crate::export::{self, MediaLoader};
 use crate::ink::{
-    default_width, draw_ants, erase_area, map_mesh, maybe_snap_shape, mixed_pressure, premultiply,
-    InkPoint, InkStroke, Nib, Tool,
+    default_width, draw_ants, erase_area, map_mesh, maybe_snap_shape, mixed_pressure, InkPoint,
+    InkStroke, Nib, Tool,
 };
 use crate::library::{ensure_png, image_size, DockEdge, HandMode, Library};
 use crate::look::Look;
@@ -20,9 +20,10 @@ use crate::seed;
 use crate::tablet::{PenSnapshot, TabletBridge};
 use crate::undo::UndoStack;
 
-const DOS_W: f32 = 248.0;
-const DOS_H: f32 = 344.0;
-const DOS_PAD: f32 = 30.0;
+const DOS_W: f32 = 232.0;
+const DOS_H: f32 = 292.0;
+const DOS_PAD: f32 = 28.0;
+const PAPER_PEEK: f32 = 118.0;
 
 #[derive(Clone)]
 enum Scene {
@@ -1042,9 +1043,8 @@ impl CahierApp {
     }
 
     fn cahier_dos(&mut self, ui: &mut Ui, meta: &crate::library::NoteMeta) -> Option<DosAct> {
-        let slot = vec2(DOS_W + DOS_PAD * 2.0, DOS_H + DOS_PAD * 2.0);
+        let slot = vec2(DOS_W + DOS_PAD * 2.0, DOS_H + DOS_PAD * 2.0 + PAPER_PEEK);
         let (slot_rect, resp) = ui.allocate_exact_size(slot, Sense::click());
-        let face = Rect::from_center_size(slot_rect.center(), vec2(DOS_W, DOS_H));
         let id = Id::new("cahier-dos").with(meta.id);
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let over = pointer.is_some_and(|p| slot_rect.contains(p));
@@ -1052,180 +1052,212 @@ impl CahierApp {
             ui.ctx().request_repaint();
         }
 
-        let lift_t = ui.ctx().animate_bool_with_time(id.with("lift"), over, 0.32);
+        let lift_t = ui.ctx().animate_bool_with_time(id.with("peek"), over, 0.42);
         let e = lift_t * lift_t * (3.0 - 2.0 * lift_t);
-        let (tx, ty) = if let Some(p) = pointer.filter(|_| over) {
-            let rel = (p - face.center()) / (face.size() * 0.5);
-            (rel.x.clamp(-1.0, 1.0), rel.y.clamp(-1.0, 1.0))
-        } else {
-            (0.0, 0.0)
-        };
-        let ax = ui.ctx().animate_value_with_time(id.with("ax"), tx, 0.18);
-        let ay = ui.ctx().animate_value_with_time(id.with("ay"), ty, 0.18);
-
-        let xf = CardXform {
-            origin: face.center(),
-            rx: -ay * 0.20 * e,
-            ry: ax * 0.28 * e + 0.055,
-            lift: 16.0 * e,
-            scale: 1.0 + 0.034 * e,
-        };
-        let hover_local = vec2(ax * DOS_W * 0.5, ay * DOS_H * 0.5);
         let cloth = self.look.cloth_at(meta.cover);
+        let cloth_deep = shade_rgb(cloth, 0.72);
+        let cloth_lit = shade_rgb(cloth, 1.12);
+        let paper = self.look.paper;
+        let ink = self.look.ink;
+
+        // Folder sits in the lower part of the slot; paper rises above.
+        let face = Rect::from_min_size(
+            pos2(
+                slot_rect.center().x - DOS_W * 0.5,
+                slot_rect.max.y - DOS_PAD - DOS_H,
+            ),
+            vec2(DOS_W, DOS_H),
+        );
         let painter = if e > 0.02 {
             ui.ctx()
                 .layer_painter(LayerId::new(Order::Foreground, id))
-                .with_clip_rect(slot_rect.expand(36.0).intersect(ui.clip_rect().expand(10.0)))
+                .with_clip_rect(slot_rect.expand(8.0).intersect(ui.clip_rect().expand(6.0)))
         } else {
             ui.painter_at(slot_rect)
         };
 
-        let sh_off = vec2(5.0 - ax * 18.0 * e, 9.0 + 18.0 * e + ay * 10.0);
-        let sh_col = self.look.shadow.gamma_multiply(0.55 + 0.45 * e);
-        for (k, a) in [(18.0, 0.28), (10.0, 0.42), (3.0, 0.7)] {
-            let r = face.translate(sh_off).expand(k * (0.4 + 0.6 * e));
+        // Soft desk shadow
+        let sh = face.translate(vec2(4.0 + 2.0 * e, 7.0 + 4.0 * e)).expand(2.0 * e);
+        painter.rect_filled(
+            sh,
+            CornerRadius::same(18),
+            self.look.shadow.gamma_multiply(0.55 + 0.25 * e),
+        );
+
+        let back = Rect::from_min_max(
+            pos2(face.min.x - 3.0, face.min.y - 10.0),
+            pos2(face.max.x + 3.0, face.max.y),
+        );
+        let r_back = CornerRadius {
+            nw: 10,
+            ne: 18,
+            sw: 16,
+            se: 16,
+        };
+        painter.rect_filled(back, r_back, cloth_deep);
+        painter.rect_stroke(
+            back,
+            r_back,
+            Stroke::new(1.0_f32, shade_rgb(cloth, 0.45)),
+            StrokeKind::Inside,
+        );
+
+        // Sliding sheet (between back and front)
+        let lip_y = face.min.y + 28.0;
+        let peek = e * PAPER_PEEK;
+        let sheet = Rect::from_min_max(
+            pos2(face.min.x + 18.0, lip_y - peek - 4.0),
+            pos2(face.max.x - 14.0, lip_y + 72.0),
+        );
+        {
             painter.rect_filled(
-                r,
-                CornerRadius::same(26),
-                Color32::from_rgba_unmultiplied(sh_col.r(), sh_col.g(), sh_col.b(), (a * 70.0) as u8),
+                sheet.translate(vec2(2.0, 3.0)),
+                CornerRadius::same(4),
+                self.look.shadow.gamma_multiply(0.28 + 0.2 * e),
             );
-        }
-
-        let depth = 12.0;
-        let mut mesh = Mesh::with_texture(TextureId::default());
-        fill_rounded_lit(
-            &mut mesh,
-            &xf,
-            DOS_W,
-            DOS_H,
-            -depth,
-            22.0,
-            shade_rgb(cloth, 0.62),
-            hover_local,
-            Vec2::ZERO,
-            0.18,
-            0.10,
-        );
-        let hw = DOS_W * 0.5;
-        let hh = DOS_H * 0.5;
-        let page = self.look.paper;
-        let page_edge = shade_rgb(page, 0.82);
-        add_quad_lit(
-            &mut mesh,
-            &xf,
-            [
-                V3::new(hw, -hh + 18.0, 0.0),
-                V3::new(hw, hh - 18.0, 0.0),
-                V3::new(hw, hh - 18.0, -depth),
-                V3::new(hw, -hh + 18.0, -depth),
-            ],
-            page_edge,
-            hover_local,
-            0.04,
-            0.05,
-        );
-        add_quad_lit(
-            &mut mesh,
-            &xf,
-            [
-                V3::new(-hw + 20.0, -hh, 0.0),
-                V3::new(hw, -hh, 0.0),
-                V3::new(hw, -hh, -depth),
-                V3::new(-hw + 20.0, -hh, -depth),
-            ],
-            shade_rgb(page, 0.9),
-            hover_local,
-            0.04,
-            0.05,
-        );
-        fill_rounded_lit(
-            &mut mesh,
-            &xf,
-            DOS_W,
-            DOS_H,
-            0.0,
-            22.0,
-            cloth,
-            hover_local,
-            Vec2::ZERO,
-            0.30,
-            0.36,
-        );
-        add_quad_lit(
-            &mut mesh,
-            &xf,
-            [
-                V3::new(-hw, -hh + 20.0, 0.35),
-                V3::new(-hw + 20.0, -hh + 8.0, 0.35),
-                V3::new(-hw + 20.0, hh - 8.0, 0.35),
-                V3::new(-hw, hh - 20.0, 0.35),
-            ],
-            shade_rgb(cloth, 0.55),
-            hover_local,
-            0.12,
-            0.10,
-        );
-        fill_rounded_lit(
-            &mut mesh,
-            &xf,
-            DOS_W - 46.0,
-            DOS_H - 44.0,
-            0.55,
-            14.0,
-            self.look.paper,
-            hover_local,
-            vec2(8.0, 0.0),
-            0.07,
-            0.08,
-        );
-        painter.add(Shape::mesh(mesh));
-
-        let outline = rounded_ring(DOS_W, DOS_H, 22.0, 7);
-        let hi = Color32::from_rgba_unmultiplied(255, 252, 244, (28.0 + 50.0 * e) as u8);
-        let n_out = outline.len();
-        for i in 0..n_out {
-            let a = outline[i];
-            let b = outline[(i + 1) % n_out];
-            painter.line_segment(
-                [xf.map(a.x, a.y, 0.2), xf.map(b.x, b.y, 0.2)],
-                Stroke::new(1.15_f32, hi),
+            painter.rect_filled(sheet, CornerRadius::same(4), paper);
+            painter.rect_stroke(
+                sheet,
+                CornerRadius::same(4),
+                Stroke::new(1.0_f32, ink.gamma_multiply(0.16)),
+                StrokeKind::Inside,
             );
+            let mut y = sheet.min.y + 20.0;
+            while y < sheet.max.y - 10.0 {
+                if y < lip_y - 2.0 || e > 0.05 {
+                    painter.line_segment(
+                        [pos2(sheet.min.x + 10.0, y), pos2(sheet.max.x - 10.0, y)],
+                        Stroke::new(1.0_f32, self.look.paper_rule),
+                    );
+                }
+                y += 14.0;
+            }
+            if e > 0.08 {
+                painter.line_segment(
+                    [
+                        pos2(sheet.min.x + 18.0, sheet.min.y + 8.0),
+                        pos2(sheet.min.x + 18.0, (lip_y - 6.0).max(sheet.min.y + 12.0)),
+                    ],
+                    Stroke::new(1.2_f32, self.look.accent.gamma_multiply(0.4 + 0.35 * e)),
+                );
+            }
         }
 
-        for y in [-hh + 36.0, 0.0, hh - 36.0] {
-            let c = xf.map(-hw + 10.0, y, 0.7);
-            painter.circle_filled(c, 3.1, self.look.punch);
-            painter.circle_stroke(c, 3.1, Stroke::new(1.0_f32, self.look.desk_deep));
-        }
-
-        let paper_left = -hw + 28.0;
-        let paper_top = -hh + 28.0;
-        let paper_right = hw - 16.0;
-        let underline_y = paper_top + 38.0;
+        // Front pocket (shorter top = opening)
+        let front = Rect::from_min_max(pos2(face.min.x, lip_y), face.max);
+        let r_front = CornerRadius {
+            nw: 6,
+            ne: 6,
+            sw: 18,
+            se: 18,
+        };
+        // cloth grain: base + subtle top highlight band
+        painter.rect_filled(front, r_front, cloth);
+        let band = Rect::from_min_max(
+            front.min,
+            pos2(front.max.x, front.min.y + 18.0),
+        );
+        painter.rect_filled(
+            band,
+            CornerRadius {
+                nw: 6,
+                ne: 6,
+                sw: 0,
+                se: 0,
+            },
+            cloth_lit.gamma_multiply(0.55),
+        );
+        painter.rect_stroke(
+            front,
+            r_front,
+            Stroke::new(1.15_f32, shade_rgb(cloth, 0.52)),
+            StrokeKind::Inside,
+        );
+        // pocket lip
         painter.line_segment(
             [
-                xf.map(paper_left + 6.0, underline_y, 0.7),
-                xf.map(paper_right - 8.0, underline_y + 2.0, 0.7),
+                pos2(front.min.x + 8.0, front.min.y + 1.0),
+                pos2(front.max.x - 8.0, front.min.y + 1.0),
             ],
-            Stroke::new(1.45_f32, self.look.ink.gamma_multiply(0.55)),
+            Stroke::new(2.2_f32, shade_rgb(cloth, 0.40)),
+        );
+
+        // Index tab
+        let tab = Rect::from_min_size(
+            pos2(face.min.x + 14.0, face.min.y - 2.0),
+            vec2(78.0, 34.0),
+        );
+        let r_tab = CornerRadius {
+            nw: 10,
+            ne: 10,
+            sw: 0,
+            se: 0,
+        };
+        painter.rect_filled(tab, r_tab, cloth_lit);
+        painter.rect_stroke(
+            tab,
+            r_tab,
+            Stroke::new(1.0_f32, shade_rgb(cloth, 0.48)),
+            StrokeKind::Inside,
+        );
+        let tab_label = meta.title.chars().take(8).collect::<String>();
+        painter.text(
+            tab.center() + vec2(0.0, 2.0),
+            Align2::CENTER_CENTER,
+            tab_label,
+            self.look.mono(11.0),
+            paper,
+        );
+
+        // Label plate on the front
+        let plate = Rect::from_min_max(
+            pos2(front.min.x + 18.0, front.min.y + 28.0),
+            pos2(front.max.x - 18.0, front.max.y - 52.0),
+        );
+        painter.rect_filled(plate, CornerRadius::same(10), paper);
+        painter.rect_stroke(
+            plate,
+            CornerRadius::same(10),
+            Stroke::new(1.0_f32, ink.gamma_multiply(0.14)),
+            StrokeKind::Inside,
+        );
+        painter.line_segment(
+            [
+                pos2(plate.min.x + 12.0, plate.min.y + 36.0),
+                pos2(plate.max.x - 12.0, plate.min.y + 38.0),
+            ],
+            Stroke::new(1.35_f32, ink.gamma_multiply(0.45)),
         );
         painter.text(
-            xf.map(paper_left + 8.0, paper_top + 50.0, 0.7),
+            pos2(plate.min.x + 14.0, plate.min.y + 48.0),
             Align2::LEFT_TOP,
             &meta.title,
-            self.look.serif(20.0),
-            self.look.ink,
+            self.look.serif(18.0),
+            ink,
         );
         let date = meta.updated.format("%d %b %Y").to_string().to_lowercase();
         painter.text(
-            xf.map(paper_left + 8.0, hh - 64.0, 0.7),
+            pos2(plate.min.x + 14.0, plate.max.y - 18.0),
             Align2::LEFT_BOTTOM,
             date,
             self.look.mono(11.0),
-            self.look.ink.gamma_multiply(0.55),
+            ink.gamma_multiply(0.55),
         );
         if meta.pinned {
-            painter.circle_filled(xf.map(hw - 22.0, -hh + 20.0, 0.8), 5.0, self.look.accent);
+            painter.circle_filled(pos2(plate.max.x - 16.0, plate.min.y + 16.0), 4.5, self.look.accent);
+        }
+
+        // Decorative stitch on the pocket
+        let mut sx = front.min.x + 14.0;
+        while sx < front.max.x - 14.0 {
+            painter.line_segment(
+                [
+                    pos2(sx, front.max.y - 14.0),
+                    pos2((sx + 5.0).min(front.max.x - 14.0), front.max.y - 14.0),
+                ],
+                Stroke::new(1.1_f32, shade_rgb(cloth, 0.42)),
+            );
+            sx += 10.0;
         }
 
         let trash_col = self
@@ -1238,8 +1270,7 @@ impl CahierApp {
         let gap = 5.0;
         let n_icons = 3.0;
         let strip = n_icons * icon + (n_icons - 1.0) * gap + 6.0;
-        let br = xf.map(hw - 18.0, hh - 20.0, 0.9);
-        let origin = pos2(br.x - strip + icon * 0.42, br.y - icon * 0.52);
+        let origin = pos2(face.max.x - 16.0 - strip, face.max.y - 18.0 - icon);
         let mut act = None;
         let dup_r = Rect::from_min_size(origin, vec2(icon, icon));
         let pin_r = Rect::from_min_size(origin + vec2(icon + gap, 0.0), vec2(icon, icon));
@@ -1336,7 +1367,9 @@ impl CahierApp {
                 if danger.is_some() {
                     fg.gamma_multiply(if resp.hovered() { 0.85 } else { 0.55 })
                 } else {
-                    self.look.ink.gamma_multiply(if resp.hovered() { 0.28 } else { 0.14 })
+                    self.look
+                        .ink
+                        .gamma_multiply(if resp.hovered() { 0.28 } else { 0.14 })
                 },
             ),
         );
@@ -2848,93 +2881,6 @@ fn shaft(p: &egui::Painter, a: Pos2, b: Pos2, thick: f32, col: Color32) {
     p.circle_filled(b, thick * 0.48, col);
 }
 
-#[derive(Clone, Copy)]
-struct V3 {
-    x: f32,
-    y: f32,
-    z: f32,
-}
-
-impl V3 {
-    fn new(x: f32, y: f32, z: f32) -> Self {
-        Self { x, y, z }
-    }
-
-    fn dot(self, o: Self) -> f32 {
-        self.x * o.x + self.y * o.y + self.z * o.z
-    }
-
-    fn norm(self) -> Self {
-        let l = (self.x * self.x + self.y * self.y + self.z * self.z).sqrt().max(1e-5);
-        Self {
-            x: self.x / l,
-            y: self.y / l,
-            z: self.z / l,
-        }
-    }
-
-    fn rot(self, rx: f32, ry: f32) -> Self {
-        let (sy, cy) = (ry.sin(), ry.cos());
-        let x = self.x * cy + self.z * sy;
-        let z = -self.x * sy + self.z * cy;
-        let y = self.y;
-        let (sx, cx) = (rx.sin(), rx.cos());
-        Self {
-            x,
-            y: y * cx - z * sx,
-            z: y * sx + z * cx,
-        }
-    }
-}
-
-struct CardXform {
-    origin: Pos2,
-    rx: f32,
-    ry: f32,
-    lift: f32,
-    scale: f32,
-}
-
-impl CardXform {
-    fn map(&self, x: f32, y: f32, z: f32) -> Pos2 {
-        let p = V3::new(x, y, z + self.lift).rot(self.rx, self.ry);
-        const D: f32 = 760.0;
-        let s = D / (D - p.z).max(140.0);
-        pos2(
-            self.origin.x + p.x * s * self.scale,
-            self.origin.y + p.y * s * self.scale,
-        )
-    }
-
-    fn bent_n(&self, local: Vec2, w: f32, h: f32, pillow: f32) -> V3 {
-        let nx = (local.x / (w * 0.5).max(1.0)) * pillow;
-        let ny = (local.y / (h * 0.5).max(1.0)) * (pillow * 0.72);
-        V3::new(nx, ny, 1.0).norm().rot(self.rx, self.ry)
-    }
-}
-
-fn rounded_ring(w: f32, h: f32, r: f32, n: usize) -> Vec<Vec2> {
-    let hw = w * 0.5;
-    let hh = h * 0.5;
-    let r = r.min(hw).min(hh);
-    let mut pts = Vec::with_capacity(n * 4);
-    let pi = std::f32::consts::PI;
-    let corners = [
-        (hw - r, -hh + r, -0.5 * pi, 0.0),
-        (hw - r, hh - r, 0.0, 0.5 * pi),
-        (-hw + r, hh - r, 0.5 * pi, pi),
-        (-hw + r, -hh + r, pi, 1.5 * pi),
-    ];
-    for (cx, cy, a0, a1) in corners {
-        for i in 0..n {
-            let t = i as f32 / n as f32;
-            let a = a0 + (a1 - a0) * t;
-            pts.push(vec2(cx + a.cos() * r, cy + a.sin() * r));
-        }
-    }
-    pts
-}
-
 fn shade_rgb(c: Color32, k: f32) -> Color32 {
     let k = k.clamp(0.12, 1.7);
     Color32::from_rgba_unmultiplied(
@@ -2954,96 +2900,6 @@ fn mix_col(a: Color32, b: Color32, t: f32) -> Color32 {
         (a.b() as f32 * u + b.b() as f32 * t) as u8,
         (a.a() as f32 * u + b.a() as f32 * t) as u8,
     )
-}
-
-fn card_shade(
-    xf: &CardXform,
-    base: Color32,
-    local: Vec2,
-    w: f32,
-    h: f32,
-    hover: Vec2,
-    pillow: f32,
-    sheen: f32,
-) -> Color32 {
-    let n = xf.bent_n(local, w, h, pillow);
-    let light = V3::new(-0.38, -0.64, 0.68).norm();
-    let diff = 0.54 + 0.46 * n.dot(light).max(0.0);
-    let ex = (local.x.abs() / (w * 0.5).max(1.0)).clamp(0.0, 1.0);
-    let ey = (local.y.abs() / (h * 0.5).max(1.0)).clamp(0.0, 1.0);
-    let ao = 1.0 - 0.18 * ex.max(ey).powf(1.6);
-    let d = (local - hover).length() / 78.0;
-    let spec = (1.0 - d.min(1.0)).powf(2.2) * sheen;
-    mix_col(shade_rgb(base, diff * ao), Color32::WHITE, spec)
-}
-
-fn push_vtx(mesh: &mut Mesh, pos: Pos2, color: Color32) -> u32 {
-    let i = mesh.vertices.len() as u32;
-    mesh.vertices.push(epaint::Vertex {
-        pos,
-        uv: Pos2::ZERO,
-        color: premultiply(color),
-    });
-    i
-}
-
-fn fill_rounded_lit(
-    mesh: &mut Mesh,
-    xf: &CardXform,
-    w: f32,
-    h: f32,
-    z: f32,
-    radius: f32,
-    color: Color32,
-    hover: Vec2,
-    shift: Vec2,
-    pillow: f32,
-    sheen: f32,
-) {
-    let ring = rounded_ring(w, h, radius, 8);
-    let center_local = shift;
-    let c = push_vtx(
-        mesh,
-        xf.map(center_local.x, center_local.y, z),
-        card_shade(xf, color, center_local, w, h, hover, pillow, sheen),
-    );
-    let mut ring_i = Vec::with_capacity(ring.len());
-    for p in &ring {
-        let local = *p + shift;
-        ring_i.push(push_vtx(
-            mesh,
-            xf.map(local.x, local.y, z),
-            card_shade(xf, color, local, w, h, hover, pillow, sheen),
-        ));
-    }
-    let n = ring_i.len();
-    for i in 0..n {
-        mesh.indices
-            .extend_from_slice(&[c, ring_i[i], ring_i[(i + 1) % n]]);
-    }
-}
-
-fn add_quad_lit(
-    mesh: &mut Mesh,
-    xf: &CardXform,
-    pts: [V3; 4],
-    color: Color32,
-    hover: Vec2,
-    pillow: f32,
-    sheen: f32,
-) {
-    let mut idx = [0u32; 4];
-    let w = DOS_W;
-    let h = DOS_H;
-    for (i, p) in pts.iter().enumerate() {
-        idx[i] = push_vtx(
-            mesh,
-            xf.map(p.x, p.y, p.z),
-            card_shade(xf, color, vec2(p.x, p.y), w, h, hover, pillow, sheen),
-        );
-    }
-    mesh.indices
-        .extend_from_slice(&[idx[0], idx[1], idx[2], idx[0], idx[2], idx[3]]);
 }
 
 fn paint_copy_pages(p: &egui::Painter, c: Pos2, fg: Color32) {
