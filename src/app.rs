@@ -10,8 +10,8 @@ use crate::camera::{page_at_y, page_origin, Camera, ZOOM_STOPS};
 use crate::document::{ImageObj, Note, PaperKind, TextBox, PAGE_H, PAGE_W};
 use crate::export::{self, MediaLoader};
 use crate::ink::{
-    default_width, draw_ants, erase_area, map_mesh, maybe_snap_shape, mixed_pressure, InkPoint,
-    InkStroke, Nib, Tool,
+    default_width, draw_ants, erase_area, map_mesh, maybe_snap_shape, mixed_pressure, premultiply,
+    InkPoint, InkStroke, Nib, Tool,
 };
 use crate::library::{ensure_png, image_size, DockEdge, HandMode, Library};
 use crate::look::Look;
@@ -20,10 +20,22 @@ use crate::seed;
 use crate::tablet::{PenSnapshot, TabletBridge};
 use crate::undo::UndoStack;
 
+const DOS_W: f32 = 248.0;
+const DOS_H: f32 = 344.0;
+const DOS_PAD: f32 = 30.0;
+
 #[derive(Clone)]
 enum Scene {
     Shelf { query: String },
     Desk,
+}
+
+#[derive(Clone, Copy)]
+enum DosAct {
+    Open,
+    Dup,
+    Pin,
+    Del,
 }
 
 struct Toast {
@@ -856,45 +868,30 @@ impl CahierApp {
                 ScrollArea::vertical().show(ui, |ui| {
                     ui.add_space(4.0);
                     let available = ui.available_width() - 48.0;
-                    let card_w = 168.0;
-                    let gap = 22.0;
+                    let card_w = DOS_W + DOS_PAD * 2.0;
+                    let gap = 6.0;
                     let cols = ((available + gap) / (card_w + gap)).floor().max(1.0) as usize;
                     let mut i = 0;
                     while i < notes.len() {
                         ui.horizontal(|ui| {
-                            ui.add_space(36.0);
+                            ui.add_space(28.0);
                             for _ in 0..cols {
                                 if i >= notes.len() {
                                     break;
                                 }
                                 let meta = notes[i].clone();
                                 i += 1;
-                                let r = self.cahier_dos(ui, &meta);
-                                if r.clicked() {
-                                    open = Some(meta.id);
+                                match self.cahier_dos(ui, &meta) {
+                                    Some(DosAct::Open) => open = Some(meta.id),
+                                    Some(DosAct::Dup) => dup = Some(meta.id),
+                                    Some(DosAct::Pin) => pin = Some(meta.id),
+                                    Some(DosAct::Del) => del = Some(meta.id),
+                                    None => {}
                                 }
-                                r.context_menu(|ui| {
-                                    if ui.button("ouvrir").clicked() {
-                                        open = Some(meta.id);
-                                        ui.close();
-                                    }
-                                    if ui.button("dupliquer").clicked() {
-                                        dup = Some(meta.id);
-                                        ui.close();
-                                    }
-                                    if ui.button(if meta.pinned { "détacher" } else { "épingler" }).clicked() {
-                                        pin = Some(meta.id);
-                                        ui.close();
-                                    }
-                                    if ui.button("jeter").clicked() {
-                                        del = Some(meta.id);
-                                        ui.close();
-                                    }
-                                });
                                 ui.add_space(gap);
                             }
                         });
-                        ui.add_space(22.0);
+                        ui.add_space(8.0);
                     }
                     let _ = &mut notes;
                 });
@@ -1044,60 +1041,307 @@ impl CahierApp {
         });
     }
 
-    fn cahier_dos(&mut self, ui: &mut Ui, meta: &crate::library::NoteMeta) -> Response {
-        let size = vec2(168.0, 236.0);
-        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-        let cloth = self.look.cloth_at(meta.cover);
-        let painter = ui.painter_at(rect);
-        let r = CornerRadius::same(22);
-        painter.rect_filled(rect.translate(vec2(4.0, 5.0)), r, self.look.shadow);
-        painter.rect_filled(rect, r, cloth);
-        let spine = Rect::from_min_max(rect.min, pos2(rect.min.x + 16.0, rect.max.y));
-        painter.rect_filled(
-            spine,
-            CornerRadius {
-                nw: 22,
-                ne: 0,
-                sw: 22,
-                se: 0,
-            },
-            self.look.desk_deep.gamma_multiply(0.55),
-        );
-        for y in [rect.min.y + 28.0, rect.center().y, rect.max.y - 28.0] {
-            painter.circle_filled(pos2(rect.min.x + 8.0, y), 3.2, self.look.punch);
-            painter.circle_stroke(pos2(rect.min.x + 8.0, y), 3.2, Stroke::new(1.0_f32, self.look.desk_deep));
+    fn cahier_dos(&mut self, ui: &mut Ui, meta: &crate::library::NoteMeta) -> Option<DosAct> {
+        let slot = vec2(DOS_W + DOS_PAD * 2.0, DOS_H + DOS_PAD * 2.0);
+        let (slot_rect, resp) = ui.allocate_exact_size(slot, Sense::click());
+        let face = Rect::from_center_size(slot_rect.center(), vec2(DOS_W, DOS_H));
+        let id = Id::new("cahier-dos").with(meta.id);
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        let over = pointer.is_some_and(|p| slot_rect.contains(p));
+        if over {
+            ui.ctx().request_repaint();
         }
-        let inner = Rect::from_min_max(
-            pos2(rect.min.x + 22.0, rect.min.y + 18.0),
-            pos2(rect.max.x - 12.0, rect.max.y - 18.0),
+
+        let lift_t = ui.ctx().animate_bool_with_time(id.with("lift"), over, 0.32);
+        let e = lift_t * lift_t * (3.0 - 2.0 * lift_t);
+        let (tx, ty) = if let Some(p) = pointer.filter(|_| over) {
+            let rel = (p - face.center()) / (face.size() * 0.5);
+            (rel.x.clamp(-1.0, 1.0), rel.y.clamp(-1.0, 1.0))
+        } else {
+            (0.0, 0.0)
+        };
+        let ax = ui.ctx().animate_value_with_time(id.with("ax"), tx, 0.18);
+        let ay = ui.ctx().animate_value_with_time(id.with("ay"), ty, 0.18);
+
+        let xf = CardXform {
+            origin: face.center(),
+            rx: -ay * 0.20 * e,
+            ry: ax * 0.28 * e + 0.055,
+            lift: 16.0 * e,
+            scale: 1.0 + 0.034 * e,
+        };
+        let hover_local = vec2(ax * DOS_W * 0.5, ay * DOS_H * 0.5);
+        let cloth = self.look.cloth_at(meta.cover);
+        let painter = if e > 0.02 {
+            ui.ctx()
+                .layer_painter(LayerId::new(Order::Foreground, id))
+                .with_clip_rect(slot_rect.expand(36.0).intersect(ui.clip_rect().expand(10.0)))
+        } else {
+            ui.painter_at(slot_rect)
+        };
+
+        let sh_off = vec2(5.0 - ax * 18.0 * e, 9.0 + 18.0 * e + ay * 10.0);
+        let sh_col = self.look.shadow.gamma_multiply(0.55 + 0.45 * e);
+        for (k, a) in [(18.0, 0.28), (10.0, 0.42), (3.0, 0.7)] {
+            let r = face.translate(sh_off).expand(k * (0.4 + 0.6 * e));
+            painter.rect_filled(
+                r,
+                CornerRadius::same(26),
+                Color32::from_rgba_unmultiplied(sh_col.r(), sh_col.g(), sh_col.b(), (a * 70.0) as u8),
+            );
+        }
+
+        let depth = 12.0;
+        let mut mesh = Mesh::with_texture(TextureId::default());
+        fill_rounded_lit(
+            &mut mesh,
+            &xf,
+            DOS_W,
+            DOS_H,
+            -depth,
+            22.0,
+            shade_rgb(cloth, 0.62),
+            hover_local,
+            Vec2::ZERO,
+            0.18,
+            0.10,
         );
-        painter.rect_filled(inner, CornerRadius::same(14), self.look.paper);
+        let hw = DOS_W * 0.5;
+        let hh = DOS_H * 0.5;
+        let page = self.look.paper;
+        let page_edge = shade_rgb(page, 0.82);
+        add_quad_lit(
+            &mut mesh,
+            &xf,
+            [
+                V3::new(hw, -hh + 18.0, 0.0),
+                V3::new(hw, hh - 18.0, 0.0),
+                V3::new(hw, hh - 18.0, -depth),
+                V3::new(hw, -hh + 18.0, -depth),
+            ],
+            page_edge,
+            hover_local,
+            0.04,
+            0.05,
+        );
+        add_quad_lit(
+            &mut mesh,
+            &xf,
+            [
+                V3::new(-hw + 20.0, -hh, 0.0),
+                V3::new(hw, -hh, 0.0),
+                V3::new(hw, -hh, -depth),
+                V3::new(-hw + 20.0, -hh, -depth),
+            ],
+            shade_rgb(page, 0.9),
+            hover_local,
+            0.04,
+            0.05,
+        );
+        fill_rounded_lit(
+            &mut mesh,
+            &xf,
+            DOS_W,
+            DOS_H,
+            0.0,
+            22.0,
+            cloth,
+            hover_local,
+            Vec2::ZERO,
+            0.30,
+            0.36,
+        );
+        add_quad_lit(
+            &mut mesh,
+            &xf,
+            [
+                V3::new(-hw, -hh + 20.0, 0.35),
+                V3::new(-hw + 20.0, -hh + 8.0, 0.35),
+                V3::new(-hw + 20.0, hh - 8.0, 0.35),
+                V3::new(-hw, hh - 20.0, 0.35),
+            ],
+            shade_rgb(cloth, 0.55),
+            hover_local,
+            0.12,
+            0.10,
+        );
+        fill_rounded_lit(
+            &mut mesh,
+            &xf,
+            DOS_W - 46.0,
+            DOS_H - 44.0,
+            0.55,
+            14.0,
+            self.look.paper,
+            hover_local,
+            vec2(8.0, 0.0),
+            0.07,
+            0.08,
+        );
+        painter.add(Shape::mesh(mesh));
+
+        let outline = rounded_ring(DOS_W, DOS_H, 22.0, 7);
+        let hi = Color32::from_rgba_unmultiplied(255, 252, 244, (28.0 + 50.0 * e) as u8);
+        let n_out = outline.len();
+        for i in 0..n_out {
+            let a = outline[i];
+            let b = outline[(i + 1) % n_out];
+            painter.line_segment(
+                [xf.map(a.x, a.y, 0.2), xf.map(b.x, b.y, 0.2)],
+                Stroke::new(1.15_f32, hi),
+            );
+        }
+
+        for y in [-hh + 36.0, 0.0, hh - 36.0] {
+            let c = xf.map(-hw + 10.0, y, 0.7);
+            painter.circle_filled(c, 3.1, self.look.punch);
+            painter.circle_stroke(c, 3.1, Stroke::new(1.0_f32, self.look.desk_deep));
+        }
+
+        let paper_left = -hw + 28.0;
+        let paper_top = -hh + 28.0;
+        let paper_right = hw - 16.0;
+        let underline_y = paper_top + 38.0;
         painter.line_segment(
-            [pos2(inner.min.x + 8.0, inner.min.y + 36.0), pos2(inner.max.x - 8.0, inner.min.y + 38.0)],
-            Stroke::new(1.4_f32, self.look.ink.gamma_multiply(0.55)),
+            [
+                xf.map(paper_left + 6.0, underline_y, 0.7),
+                xf.map(paper_right - 8.0, underline_y + 2.0, 0.7),
+            ],
+            Stroke::new(1.45_f32, self.look.ink.gamma_multiply(0.55)),
         );
         painter.text(
-            pos2(inner.min.x + 10.0, inner.min.y + 48.0),
+            xf.map(paper_left + 8.0, paper_top + 50.0, 0.7),
             Align2::LEFT_TOP,
             &meta.title,
-            self.look.serif(16.0),
+            self.look.serif(20.0),
             self.look.ink,
         );
         let date = meta.updated.format("%d %b %Y").to_string().to_lowercase();
         painter.text(
-            pos2(inner.min.x + 10.0, inner.max.y - 28.0),
+            xf.map(paper_left + 8.0, hh - 64.0, 0.7),
             Align2::LEFT_BOTTOM,
             date,
-            self.look.mono(10.0),
+            self.look.mono(11.0),
             self.look.ink.gamma_multiply(0.55),
         );
         if meta.pinned {
-            painter.circle_filled(pos2(rect.max.x - 18.0, rect.min.y + 16.0), 4.0, self.look.accent);
+            painter.circle_filled(xf.map(hw - 22.0, -hh + 20.0, 0.8), 5.0, self.look.accent);
         }
-        if resp.hovered() {
-            painter.rect_stroke(rect, r, Stroke::new(1.5_f32, self.look.accent), StrokeKind::Outside);
+
+        let trash_col = self
+            .look
+            .inks
+            .get(2)
+            .copied()
+            .unwrap_or(Color32::from_rgb(0xe2, 0x4b, 0x4a));
+        let icon = 30.0;
+        let gap = 5.0;
+        let n_icons = 3.0;
+        let strip = n_icons * icon + (n_icons - 1.0) * gap + 6.0;
+        let br = xf.map(hw - 18.0, hh - 20.0, 0.9);
+        let origin = pos2(br.x - strip + icon * 0.42, br.y - icon * 0.52);
+        let mut act = None;
+        let dup_r = Rect::from_min_size(origin, vec2(icon, icon));
+        let pin_r = Rect::from_min_size(origin + vec2(icon + gap, 0.0), vec2(icon, icon));
+        let del_r = Rect::from_min_size(
+            origin + vec2(icon * 2.0 + gap * 2.0 + 6.0, 0.0),
+            vec2(icon, icon),
+        );
+
+        if self
+            .dos_icon(
+                ui,
+                &painter,
+                id.with("dup"),
+                dup_r,
+                self.look.ink,
+                None,
+                paint_copy_pages,
+            )
+            .on_hover_text("dupliquer")
+            .clicked()
+        {
+            act = Some(DosAct::Dup);
         }
-        resp
+        let pin_fg = if meta.pinned {
+            self.look.accent
+        } else {
+            self.look.ink
+        };
+        if self
+            .dos_icon(ui, &painter, id.with("pin"), pin_r, pin_fg, None, paint_pin)
+            .on_hover_text(if meta.pinned { "détacher" } else { "épingler" })
+            .clicked()
+        {
+            act = Some(DosAct::Pin);
+        }
+        if self
+            .dos_icon(
+                ui,
+                &painter,
+                id.with("del"),
+                del_r,
+                trash_col,
+                Some(trash_col),
+                paint_bin,
+            )
+            .on_hover_text("jeter")
+            .clicked()
+        {
+            act = Some(DosAct::Del);
+        }
+
+        if act.is_none() && resp.clicked() {
+            act = Some(DosAct::Open);
+        }
+        resp.on_hover_cursor(CursorIcon::PointingHand);
+        act
+    }
+
+    fn dos_icon(
+        &self,
+        ui: &mut Ui,
+        painter: &Painter,
+        id: Id,
+        rect: Rect,
+        fg: Color32,
+        danger: Option<Color32>,
+        paint: impl FnOnce(&Painter, Pos2, Color32),
+    ) -> Response {
+        let resp = ui.interact(rect, id, Sense::click());
+        let c = rect.center();
+        let r = rect.width() * 0.46;
+        painter.circle_filled(
+            c + vec2(0.7, 1.1),
+            r,
+            self.look.shadow.gamma_multiply(0.55),
+        );
+        let fill = if let Some(d) = danger {
+            if resp.hovered() {
+                mix_col(self.look.paper, d, 0.28)
+            } else {
+                mix_col(self.look.paper, d, 0.10)
+            }
+        } else if resp.hovered() {
+            self.look.paper
+        } else {
+            self.look.paper.gamma_multiply(0.96)
+        };
+        painter.circle_filled(c, r, fill);
+        painter.circle_stroke(
+            c,
+            r,
+            Stroke::new(
+                1.05_f32,
+                if danger.is_some() {
+                    fg.gamma_multiply(if resp.hovered() { 0.85 } else { 0.55 })
+                } else {
+                    self.look.ink.gamma_multiply(if resp.hovered() { 0.28 } else { 0.14 })
+                },
+            ),
+        );
+        paint(painter, c, fg);
+        resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
     fn objet_btn(&self, ui: &mut Ui, label: &str, accent: bool) -> bool {
@@ -2602,6 +2846,250 @@ fn shaft(p: &egui::Painter, a: Pos2, b: Pos2, thick: f32, col: Color32) {
     p.line_segment([a, b], Stroke::new(thick, col));
     p.circle_filled(a, thick * 0.48, col);
     p.circle_filled(b, thick * 0.48, col);
+}
+
+#[derive(Clone, Copy)]
+struct V3 {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+impl V3 {
+    fn new(x: f32, y: f32, z: f32) -> Self {
+        Self { x, y, z }
+    }
+
+    fn dot(self, o: Self) -> f32 {
+        self.x * o.x + self.y * o.y + self.z * o.z
+    }
+
+    fn norm(self) -> Self {
+        let l = (self.x * self.x + self.y * self.y + self.z * self.z).sqrt().max(1e-5);
+        Self {
+            x: self.x / l,
+            y: self.y / l,
+            z: self.z / l,
+        }
+    }
+
+    fn rot(self, rx: f32, ry: f32) -> Self {
+        let (sy, cy) = (ry.sin(), ry.cos());
+        let x = self.x * cy + self.z * sy;
+        let z = -self.x * sy + self.z * cy;
+        let y = self.y;
+        let (sx, cx) = (rx.sin(), rx.cos());
+        Self {
+            x,
+            y: y * cx - z * sx,
+            z: y * sx + z * cx,
+        }
+    }
+}
+
+struct CardXform {
+    origin: Pos2,
+    rx: f32,
+    ry: f32,
+    lift: f32,
+    scale: f32,
+}
+
+impl CardXform {
+    fn map(&self, x: f32, y: f32, z: f32) -> Pos2 {
+        let p = V3::new(x, y, z + self.lift).rot(self.rx, self.ry);
+        const D: f32 = 760.0;
+        let s = D / (D - p.z).max(140.0);
+        pos2(
+            self.origin.x + p.x * s * self.scale,
+            self.origin.y + p.y * s * self.scale,
+        )
+    }
+
+    fn bent_n(&self, local: Vec2, w: f32, h: f32, pillow: f32) -> V3 {
+        let nx = (local.x / (w * 0.5).max(1.0)) * pillow;
+        let ny = (local.y / (h * 0.5).max(1.0)) * (pillow * 0.72);
+        V3::new(nx, ny, 1.0).norm().rot(self.rx, self.ry)
+    }
+}
+
+fn rounded_ring(w: f32, h: f32, r: f32, n: usize) -> Vec<Vec2> {
+    let hw = w * 0.5;
+    let hh = h * 0.5;
+    let r = r.min(hw).min(hh);
+    let mut pts = Vec::with_capacity(n * 4);
+    let pi = std::f32::consts::PI;
+    let corners = [
+        (hw - r, -hh + r, -0.5 * pi, 0.0),
+        (hw - r, hh - r, 0.0, 0.5 * pi),
+        (-hw + r, hh - r, 0.5 * pi, pi),
+        (-hw + r, -hh + r, pi, 1.5 * pi),
+    ];
+    for (cx, cy, a0, a1) in corners {
+        for i in 0..n {
+            let t = i as f32 / n as f32;
+            let a = a0 + (a1 - a0) * t;
+            pts.push(vec2(cx + a.cos() * r, cy + a.sin() * r));
+        }
+    }
+    pts
+}
+
+fn shade_rgb(c: Color32, k: f32) -> Color32 {
+    let k = k.clamp(0.12, 1.7);
+    Color32::from_rgba_unmultiplied(
+        (c.r() as f32 * k).min(255.0) as u8,
+        (c.g() as f32 * k).min(255.0) as u8,
+        (c.b() as f32 * k).min(255.0) as u8,
+        c.a(),
+    )
+}
+
+fn mix_col(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let u = 1.0 - t;
+    Color32::from_rgba_unmultiplied(
+        (a.r() as f32 * u + b.r() as f32 * t) as u8,
+        (a.g() as f32 * u + b.g() as f32 * t) as u8,
+        (a.b() as f32 * u + b.b() as f32 * t) as u8,
+        (a.a() as f32 * u + b.a() as f32 * t) as u8,
+    )
+}
+
+fn card_shade(
+    xf: &CardXform,
+    base: Color32,
+    local: Vec2,
+    w: f32,
+    h: f32,
+    hover: Vec2,
+    pillow: f32,
+    sheen: f32,
+) -> Color32 {
+    let n = xf.bent_n(local, w, h, pillow);
+    let light = V3::new(-0.38, -0.64, 0.68).norm();
+    let diff = 0.54 + 0.46 * n.dot(light).max(0.0);
+    let ex = (local.x.abs() / (w * 0.5).max(1.0)).clamp(0.0, 1.0);
+    let ey = (local.y.abs() / (h * 0.5).max(1.0)).clamp(0.0, 1.0);
+    let ao = 1.0 - 0.18 * ex.max(ey).powf(1.6);
+    let d = (local - hover).length() / 78.0;
+    let spec = (1.0 - d.min(1.0)).powf(2.2) * sheen;
+    mix_col(shade_rgb(base, diff * ao), Color32::WHITE, spec)
+}
+
+fn push_vtx(mesh: &mut Mesh, pos: Pos2, color: Color32) -> u32 {
+    let i = mesh.vertices.len() as u32;
+    mesh.vertices.push(epaint::Vertex {
+        pos,
+        uv: Pos2::ZERO,
+        color: premultiply(color),
+    });
+    i
+}
+
+fn fill_rounded_lit(
+    mesh: &mut Mesh,
+    xf: &CardXform,
+    w: f32,
+    h: f32,
+    z: f32,
+    radius: f32,
+    color: Color32,
+    hover: Vec2,
+    shift: Vec2,
+    pillow: f32,
+    sheen: f32,
+) {
+    let ring = rounded_ring(w, h, radius, 8);
+    let center_local = shift;
+    let c = push_vtx(
+        mesh,
+        xf.map(center_local.x, center_local.y, z),
+        card_shade(xf, color, center_local, w, h, hover, pillow, sheen),
+    );
+    let mut ring_i = Vec::with_capacity(ring.len());
+    for p in &ring {
+        let local = *p + shift;
+        ring_i.push(push_vtx(
+            mesh,
+            xf.map(local.x, local.y, z),
+            card_shade(xf, color, local, w, h, hover, pillow, sheen),
+        ));
+    }
+    let n = ring_i.len();
+    for i in 0..n {
+        mesh.indices
+            .extend_from_slice(&[c, ring_i[i], ring_i[(i + 1) % n]]);
+    }
+}
+
+fn add_quad_lit(
+    mesh: &mut Mesh,
+    xf: &CardXform,
+    pts: [V3; 4],
+    color: Color32,
+    hover: Vec2,
+    pillow: f32,
+    sheen: f32,
+) {
+    let mut idx = [0u32; 4];
+    let w = DOS_W;
+    let h = DOS_H;
+    for (i, p) in pts.iter().enumerate() {
+        idx[i] = push_vtx(
+            mesh,
+            xf.map(p.x, p.y, p.z),
+            card_shade(xf, color, vec2(p.x, p.y), w, h, hover, pillow, sheen),
+        );
+    }
+    mesh.indices
+        .extend_from_slice(&[idx[0], idx[1], idx[2], idx[0], idx[2], idx[3]]);
+}
+
+fn paint_copy_pages(p: &egui::Painter, c: Pos2, fg: Color32) {
+    let st = Stroke::new(1.55_f32, fg);
+    let a = Rect::from_center_size(c + vec2(-2.2, 1.6), vec2(11.4, 13.2));
+    let b = Rect::from_center_size(c + vec2(2.4, -1.8), vec2(11.4, 13.2));
+    p.rect_stroke(b, 2.4, st, StrokeKind::Inside);
+    p.rect_stroke(a, 2.4, st, StrokeKind::Inside);
+}
+
+fn paint_pin(p: &egui::Painter, c: Pos2, fg: Color32) {
+    p.circle_filled(pos2(c.x, c.y - 3.6), 3.5, fg);
+    p.circle_stroke(pos2(c.x, c.y - 3.6), 3.5, Stroke::new(1.2_f32, fg));
+    p.line_segment(
+        [pos2(c.x, c.y - 0.4), pos2(c.x, c.y + 8.0)],
+        Stroke::new(1.7_f32, fg),
+    );
+    p.circle_filled(pos2(c.x, c.y + 8.0), 1.15, fg);
+}
+
+fn paint_bin(p: &egui::Painter, c: Pos2, fg: Color32) {
+    p.add(egui::Shape::convex_polygon(
+        vec![
+            pos2(c.x - 5.5, c.y - 3.0),
+            pos2(c.x + 5.5, c.y - 3.0),
+            pos2(c.x + 4.3, c.y + 7.5),
+            pos2(c.x - 4.3, c.y + 7.5),
+        ],
+        fg.gamma_multiply(0.88),
+        Stroke::NONE,
+    ));
+    let st = Stroke::new(1.65_f32, fg);
+    p.line_segment([pos2(c.x - 6.8, c.y - 3.2), pos2(c.x + 6.8, c.y - 3.2)], st);
+    p.line_segment([pos2(c.x - 2.3, c.y - 5.8), pos2(c.x + 2.3, c.y - 5.8)], st);
+    p.line_segment(
+        [pos2(c.x, c.y - 5.8), pos2(c.x, c.y - 3.2)],
+        Stroke::new(1.45_f32, fg),
+    );
+    p.line_segment(
+        [pos2(c.x - 2.2, c.y - 1.2), pos2(c.x - 1.6, c.y + 5.4)],
+        Stroke::new(1.35_f32, shade_rgb(fg, 0.55)),
+    );
+    p.line_segment(
+        [pos2(c.x + 2.2, c.y - 1.2), pos2(c.x + 1.6, c.y + 5.4)],
+        Stroke::new(1.35_f32, shade_rgb(fg, 0.55)),
+    );
 }
 
 fn paint_plus(p: &egui::Painter, c: Pos2, fg: Color32) {
