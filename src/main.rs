@@ -38,9 +38,10 @@ Gestes (dans un cahier):
   p feutre   b plume   c crayon   h surligneur
   e gomme (re-clic = zone)   l lasso   t texte
   [ ] épaisseur   1-9 encre   m papier
-  espace+glisser panorama   ctrl+molette zoom
+  + − zoom   0 / coins = taille écran
+  pincement ou ctrl+molette zoom
+  espace+glisser panorama
   glisser la poignée de la trousse → haut / bas / côtés
-  espace+glisser panorama   ctrl+molette zoom
   shift relâché après un trait ≈ forme (ligne, cercle, rectangle)
   clic droit = gomme   ctrl+z/y   ctrl+e png   ctrl+shift+e pdf
 ";

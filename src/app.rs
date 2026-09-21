@@ -6,7 +6,7 @@ use std::time::Instant;
 use eframe::egui::*;
 use uuid::Uuid;
 
-use crate::camera::{page_at_y, page_origin, Camera};
+use crate::camera::{page_at_y, page_origin, Camera, ZOOM_STOPS};
 use crate::document::{ImageObj, Note, PaperKind, TextBox, PAGE_H, PAGE_W};
 use crate::export::{self, MediaLoader};
 use crate::ink::{
@@ -73,7 +73,7 @@ pub struct CahierApp {
     dock_float: Option<Pos2>,
     dock_grab: Vec2,
     dock_moved: bool,
-    last_canvas: Vec2,
+    canvas_rect: Rect,
     tablet: TabletBridge,
     live_from_pen: bool,
 }
@@ -117,7 +117,7 @@ impl CahierApp {
             dock_float: None,
             dock_grab: Vec2::ZERO,
             dock_moved: false,
-            last_canvas: Vec2::ZERO,
+            canvas_rect: Rect::ZERO,
             tablet: TabletBridge::new(),
             live_from_pen: false,
         };
@@ -159,6 +159,68 @@ impl CahierApp {
             .as_ref()
             .map(|n| n.page_h.max(1.0))
             .unwrap_or(PAGE_H)
+    }
+
+    fn page_in_view(&self, rect: Rect) -> usize {
+        let n = self.note.as_ref().map(|n| n.pages.len()).unwrap_or(1);
+        page_at_y(self.camera.to_paper(rect.center(), rect).y, n, self.ph())
+    }
+
+    fn fit_zoom_now(&self) -> f32 {
+        let rect = self.canvas_rect;
+        if rect.width() < 10.0 {
+            return 1.0;
+        }
+        let (pw, ph) = self
+            .note
+            .as_ref()
+            .map(|n| n.page_size())
+            .unwrap_or((PAGE_W, PAGE_H));
+        Camera::fit_zoom(rect, pw, ph)
+    }
+
+    /// 100 = feuille collée à l’écran.
+    fn zoom_percent(&self) -> i32 {
+        let fit = self.fit_zoom_now();
+        ((self.camera.zoom / fit.max(0.001)) * 100.0).round() as i32
+    }
+
+    fn zoom_level(&self) -> f32 {
+        self.camera.zoom / self.fit_zoom_now().max(0.001)
+    }
+
+    fn set_zoom_level(&mut self, level: f32) {
+        let rect = self.canvas_rect;
+        if rect.width() < 10.0 {
+            return;
+        }
+        let target = (self.fit_zoom_now() * level).max(0.001);
+        self.camera.set_zoom_at(rect.center(), rect, target);
+    }
+
+    fn zoom_in(&mut self) {
+        let cur = self.zoom_level();
+        let next = ZOOM_STOPS
+            .iter()
+            .copied()
+            .find(|&s| s > cur + 0.03)
+            .unwrap_or(*ZOOM_STOPS.last().unwrap());
+        self.set_zoom_level(next);
+    }
+
+    fn zoom_out(&mut self) {
+        let cur = self.zoom_level();
+        let next = ZOOM_STOPS
+            .iter()
+            .copied()
+            .rev()
+            .find(|&s| s < cur - 0.03)
+            .unwrap_or(*ZOOM_STOPS.first().unwrap());
+        self.set_zoom_level(next);
+    }
+
+    fn fit_to_screen(&mut self) {
+        self.need_fit = true;
     }
 
     fn mark_dirty(&mut self) {
@@ -315,6 +377,8 @@ impl CahierApp {
         let mut export_png = false;
         let mut export_pdf = false;
         let mut fit = false;
+        let mut zoom_in = false;
+        let mut zoom_out = false;
         let mut close = false;
         let mut delete_sel = false;
         let mut dup = false;
@@ -324,6 +388,7 @@ impl CahierApp {
         let mut color: Option<usize> = None;
         let mut cycle_paper = false;
 
+        let typing = ctx.wants_keyboard_input() || self.editing_text.is_some();
         ctx.input(|i| {
             let c = i.modifiers.command;
             let sh = i.modifiers.shift;
@@ -347,8 +412,20 @@ impl CahierApp {
             } else if c && i.key_pressed(Key::E) {
                 export_png = true;
             }
-            if c && i.key_pressed(Key::Num0) {
+            if (c && i.key_pressed(Key::Num0))
+                || (!typing && !c && i.key_pressed(Key::Num0))
+            {
                 fit = true;
+            }
+            if !typing
+                && (i.key_pressed(Key::Plus)
+                    || i.key_pressed(Key::Equals)
+                    || (c && i.key_pressed(Key::Equals)))
+            {
+                zoom_in = true;
+            }
+            if !typing && i.key_pressed(Key::Minus) {
+                zoom_out = true;
             }
             if c && i.key_pressed(Key::D) {
                 dup = true;
@@ -471,7 +548,13 @@ impl CahierApp {
                 self.export_pdf(ctx);
             }
             if fit {
-                self.need_fit = true;
+                self.fit_to_screen();
+            }
+            if zoom_in {
+                self.zoom_in();
+            }
+            if zoom_out {
+                self.zoom_out();
             }
             if delete_sel {
                 self.delete_selection();
@@ -925,10 +1008,48 @@ impl CahierApp {
                         }
                         if self
                             .round_well(ui, 36.0, false, paint_fit)
-                            .on_hover_text("cadrer")
+                            .on_hover_text("taille écran")
                             .clicked()
                         {
-                            self.need_fit = true;
+                            self.fit_to_screen();
+                        }
+                        if self
+                            .round_well(ui, 36.0, false, paint_zoom_in)
+                            .on_hover_text("zoomer  +")
+                            .clicked()
+                        {
+                            self.zoom_in();
+                        }
+                        {
+                            let pct = format!("{}%", self.zoom_percent());
+                            let near_fit = (self.zoom_percent() - 100).abs() <= 2;
+                            let color = if near_fit {
+                                self.look.fg
+                            } else {
+                                self.look.muted
+                            };
+                            let (r, lab) = ui.allocate_exact_size(vec2(46.0, 28.0), Sense::click());
+                            ui.painter().text(
+                                r.center(),
+                                Align2::CENTER_CENTER,
+                                pct,
+                                self.look.mono(12.0),
+                                color,
+                            );
+                            if lab
+                                .on_hover_text("taille écran")
+                                .on_hover_cursor(CursorIcon::PointingHand)
+                                .clicked()
+                            {
+                                self.fit_to_screen();
+                            }
+                        }
+                        if self
+                            .round_well(ui, 36.0, false, paint_zoom_out)
+                            .on_hover_text("dézoomer  −")
+                            .clicked()
+                        {
+                            self.zoom_out();
                         }
                         if self
                             .round_well(ui, 36.0, false, paint_paper_icon)
@@ -1287,24 +1408,31 @@ impl CahierApp {
     fn ui_canvas(&mut self, ui: &mut Ui) {
         let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let rect = resp.rect;
-        let resized = (rect.size() - self.last_canvas).length() > 6.0;
-        if (self.need_fit || resized) && rect.width() > 10.0 {
-            self.last_canvas = rect.size();
-            if let Some(n) = &mut self.note {
-                if n.grow_to_view(vec2(
-                    (rect.width() - 16.0).max(120.0),
-                    (rect.height() - 16.0).max(160.0),
-                )) {
-                    self.mark_dirty();
-                }
-            }
-            let (pw, ph) = self
+        self.canvas_rect = rect;
+        if rect.width() > 10.0 {
+            let grew = self
                 .note
-                .as_ref()
-                .map(|n| n.page_size())
-                .unwrap_or((PAGE_W, PAGE_H));
-            self.camera.fit_page(rect, 0, pw, ph);
-            self.need_fit = false;
+                .as_mut()
+                .map(|n| {
+                    n.grow_to_view(vec2(
+                        (rect.width() - 16.0).max(120.0),
+                        (rect.height() - 16.0).max(160.0),
+                    ))
+                })
+                .unwrap_or(false);
+            if grew {
+                self.mark_dirty();
+            }
+            if self.need_fit {
+                let (pw, ph) = self
+                    .note
+                    .as_ref()
+                    .map(|n| n.page_size())
+                    .unwrap_or((PAGE_W, PAGE_H));
+                let page = self.page_in_view(rect);
+                self.camera.fit_page(rect, page, pw, ph);
+                self.need_fit = false;
+            }
         }
 
         self.handle_camera(ui, &resp, rect);
@@ -1317,46 +1445,37 @@ impl CahierApp {
     fn handle_camera(&mut self, ui: &Ui, resp: &Response, rect: Rect) {
         let space = ui.input(|i| i.key_down(Key::Space));
         let middle = ui.input(|i| i.pointer.middle_down());
-        let ctrl = ui.input(|i| i.modifiers.command);
-        if let Some(hover) = resp.hover_pos() {
-            let scroll = ui.input(|i| i.raw_scroll_delta);
-            let zoom_ev = ui.input(|i| {
-                i.events.iter().find_map(|e| match e {
-                    Event::Zoom(z) => Some(*z),
-                    _ => None,
-                })
-            });
-            if let Some(z) = zoom_ev {
-                self.camera.zoom_at(hover, rect, z);
-            } else if ctrl && scroll.y.abs() > 0.0 {
-                let f = (1.0 + scroll.y * 0.004).clamp(0.5, 1.8);
-                self.camera.zoom_at(hover, rect, f);
-            } else if !ctrl && scroll != Vec2::ZERO {
-                self.camera.pan += scroll;
-            }
+        let (zoom, pinch_pan, pinch_center, ctrl, scroll) = ui.input(|i| {
+            let mt = i.multi_touch();
+            (
+                i.zoom_delta(),
+                mt.map(|m| m.translation_delta).unwrap_or(Vec2::ZERO),
+                mt.map(|m| m.center_pos),
+                i.modifiers.command,
+                i.raw_scroll_delta,
+            )
+        });
+        let focus = pinch_center
+            .or(resp.hover_pos())
+            .unwrap_or(rect.center());
+        if (zoom - 1.0).abs() > 0.0005 {
+            self.camera.zoom_at(focus, rect, zoom);
+        }
+        if pinch_pan != Vec2::ZERO {
+            self.camera.pan += pinch_pan;
+        } else if !ctrl && resp.hovered() && scroll != Vec2::ZERO {
+            self.camera.pan += scroll;
         }
         let pan = space || middle;
         if pan && resp.dragged() {
-            self.camera.pan += resp.drag_delta();
-        }
-        let mut n_touch = 0;
-        ui.input(|i| {
-            for e in &i.events {
-                if let Event::Touch { phase, .. } = e {
-                    if *phase != TouchPhase::End && *phase != TouchPhase::Cancel {
-                        n_touch += 1;
-                    }
-                }
-            }
-        });
-        if n_touch >= 2 && resp.dragged() {
             self.camera.pan += resp.drag_delta();
         }
     }
 
     fn handle_tool(&mut self, ui: &Ui, resp: &Response, rect: Rect) {
         let space = ui.input(|i| i.key_down(Key::Space));
-        if space || ui.input(|i| i.pointer.middle_down()) {
+        if space || ui.input(|i| i.pointer.middle_down()) || ui.input(|i| i.multi_touch().is_some())
+        {
             return;
         }
         let shift = ui.input(|i| i.modifiers.shift);
@@ -2203,6 +2322,17 @@ fn paint_fit(p: &egui::Painter, c: Pos2, fg: Color32) {
     p.line_segment([pos2(c.x - s, c.y + s), pos2(c.x - m, c.y + s)], st);
     p.line_segment([pos2(c.x + s, c.y + m), pos2(c.x + s, c.y + s)], st);
     p.line_segment([pos2(c.x + s, c.y + s), pos2(c.x + m, c.y + s)], st);
+}
+
+fn paint_zoom_in(p: &egui::Painter, c: Pos2, fg: Color32) {
+    p.circle_stroke(c, 8.4, Stroke::new(1.7_f32, fg));
+    p.rect_filled(Rect::from_center_size(c, vec2(9.0, 2.15)), 1.2, fg);
+    p.rect_filled(Rect::from_center_size(c, vec2(2.15, 9.0)), 1.2, fg);
+}
+
+fn paint_zoom_out(p: &egui::Painter, c: Pos2, fg: Color32) {
+    p.circle_stroke(c, 8.4, Stroke::new(1.7_f32, fg));
+    p.rect_filled(Rect::from_center_size(c, vec2(9.0, 2.15)), 1.2, fg);
 }
 
 fn paint_paper_icon(p: &egui::Painter, c: Pos2, fg: Color32) {
