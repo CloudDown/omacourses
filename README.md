@@ -38,7 +38,7 @@ Thème lu depuis `omarchy theme current` / `colors.toml`.
 | `[` `]` `1-9` | épaisseur, encre |
 | `m` | cycle papier (vierge, ligné, quadrillé, pointé, millimétré, ardoise) |
 | espace + glisser, deux doigts | panorama |
-| `+` `−` · boutons · pincement · ctrl + molette | zoom |
+| `+` `−` · boutons · pincement · deux doigts sur le pad · ctrl + molette | zoom |
 | coins / `0` / clic sur le % | taille écran |
 | clic droit | gomme |
 | shift en relâchant un trait | ligne / cercle / rectangle |

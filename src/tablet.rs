@@ -1,19 +1,24 @@
-//! Pont Wayland `zwp_tablet_manager_v2` → encre.
+//! Pont Wayland tablette + pavé tactile.
 //!
-//! winit 0.30 n’écoute pas le protocole tablette. Sous Hyprland le stylet
-//! (Galaxy Book / Wacom AES) n’apparaît donc jamais comme souris. On se greffe
-//! sur le `wl_display` d’eframe (guest) et on lit tip / motion / pression.
+//! winit 0.30 n’écoute pas `zwp_tablet_manager_v2` ni les pincements
+//! `zwp_pointer_gestures_v1` (Linux). On se greffe sur le `wl_display`
+//! d’eframe (guest) : stylet (tip / pression) et pinch du pad clavier.
 
 use std::collections::HashSet;
 
-use egui::Pos2;
+use egui::{Pos2, Vec2};
 use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use wayland_backend::client::Backend;
 use wayland_client::protocol::{
+    wl_pointer::{self, WlPointer},
     wl_registry::{self, WlRegistry},
     wl_seat::{self, WlSeat},
 };
 use wayland_client::{event_created_child, Connection, Dispatch, EventQueue, QueueHandle, WEnum};
+use wayland_protocols::wp::pointer_gestures::zv1::client::{
+    zwp_pointer_gesture_pinch_v1::{self, ZwpPointerGesturePinchV1},
+    zwp_pointer_gestures_v1::{self, ZwpPointerGesturesV1},
+};
 use wayland_protocols::wp::tablet::zv2::client::{
     zwp_tablet_manager_v2::{self, ZwpTabletManagerV2},
     zwp_tablet_pad_dial_v2::{self, ZwpTabletPadDialV2},
@@ -29,7 +34,7 @@ use wayland_protocols::wp::tablet::zv2::client::{
 const BTN_STYLUS: u32 = 0x14b;
 const BTN_STYLUS2: u32 = 0x14c;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct PenSnapshot {
     pub pos: Option<Pos2>,
     pub samples: Vec<Pos2>,
@@ -37,8 +42,36 @@ pub struct PenSnapshot {
     pub pressed: bool,
     pub released: bool,
     pub eraser: bool,
+    /// Bouton 2 tenu → lasso le temps du geste.
+    pub lasso_btn: bool,
+    /// Clic bouton 1 en l’air (proximité, sans poser la pointe).
+    pub air_toggle: bool,
     pub pressure: Option<f32>,
     pub in_proximity: bool,
+    /// Facteur de zoom du pincement pavé (1.0 = aucun), relatif à cette frame.
+    pub pinch_zoom: f32,
+    pub pinch_pan: Vec2,
+    pub pinching: bool,
+}
+
+impl Default for PenSnapshot {
+    fn default() -> Self {
+        Self {
+            pos: None,
+            samples: Vec::new(),
+            down: false,
+            pressed: false,
+            released: false,
+            eraser: false,
+            lasso_btn: false,
+            air_toggle: false,
+            pressure: None,
+            in_proximity: false,
+            pinch_zoom: 1.0,
+            pinch_pan: Vec2::ZERO,
+            pinching: false,
+        }
+    }
 }
 
 pub struct TabletBridge {
@@ -69,7 +102,21 @@ struct TabletState {
     in_proximity: bool,
     eraser_tool: bool,
     stylus_btn: bool,
+    stylus2_btn: bool,
+    /// Down vu pendant que le bouton 1 était tenu — pas un clic en l’air.
+    stylus_btn_saw_down: bool,
+    air_toggle: bool,
     pressure: Option<f32>,
+    gestures: Option<ZwpPointerGesturesV1>,
+    #[allow(dead_code)]
+    pointers: Vec<WlPointer>,
+    #[allow(dead_code)]
+    pinches: Vec<ZwpPointerGesturePinchV1>,
+    pinch_bound: HashSet<u32>,
+    pinch_last_scale: f32,
+    pinch_zoom: f32,
+    pinch_pan: Vec2,
+    pinching: bool,
 }
 
 impl TabletBridge {
@@ -98,7 +145,10 @@ impl TabletBridge {
         };
         inner.state.pressed = false;
         inner.state.released = false;
+        inner.state.air_toggle = false;
         inner.state.samples.clear();
+        inner.state.pinch_zoom = 1.0;
+        inner.state.pinch_pan = Vec2::ZERO;
         let _ = inner.conn.flush();
         if inner.queue.dispatch_pending(&mut inner.state).is_err() {
             self.dead = true;
@@ -120,8 +170,13 @@ impl TabletBridge {
             pressed: s.pressed,
             released: s.released,
             eraser: s.eraser_tool || s.stylus_btn,
+            lasso_btn: s.stylus2_btn,
+            air_toggle: s.air_toggle,
             pressure: s.pressure,
             in_proximity: s.in_proximity,
+            pinch_zoom: s.pinch_zoom,
+            pinch_pan: s.pinch_pan,
+            pinching: s.pinching,
         }
     }
 
@@ -132,7 +187,11 @@ impl TabletBridge {
         match &self.inner {
             None => true,
             Some(i) => {
-                i.state.in_proximity || i.state.down || i.state.manager.is_none()
+                i.state.in_proximity
+                    || i.state.down
+                    || i.state.pinching
+                    || i.state.manager.is_none()
+                    || i.state.gestures.is_none()
             }
         }
     }
@@ -170,6 +229,21 @@ impl TabletState {
                 .push(manager.get_tablet_seat(seat, qh, ()));
         }
     }
+
+    fn bind_pinches(&mut self, qh: &QueueHandle<Self>) {
+        let Some(gestures) = self.gestures.clone() else {
+            return;
+        };
+        for (name, seat) in &self.seats {
+            if !self.pinch_bound.insert(*name) {
+                continue;
+            }
+            let pointer = seat.get_pointer(qh, ());
+            let pinch = gestures.get_pinch_gesture(&pointer, qh, ());
+            self.pointers.push(pointer);
+            self.pinches.push(pinch);
+        }
+    }
 }
 
 fn tool_pos(x: f64, y: f64) -> Pos2 {
@@ -196,12 +270,20 @@ impl Dispatch<WlRegistry, ()> for TabletState {
                     let seat: WlSeat = registry.bind(name, version.min(1), qh, ());
                     state.seats.push((name, seat));
                     state.bind_tablet_seats(qh);
+                    state.bind_pinches(qh);
                 }
                 "zwp_tablet_manager_v2" | "wp_tablet_manager_v2" => {
                     if state.manager.is_none() {
                         state.manager =
                             Some(registry.bind(name, version.min(2), qh, ()));
                         state.bind_tablet_seats(qh);
+                    }
+                }
+                "zwp_pointer_gestures_v1" => {
+                    if state.gestures.is_none() {
+                        state.gestures =
+                            Some(registry.bind(name, version.min(1), qh, ()));
+                        state.bind_pinches(qh);
                     }
                 }
                 _ => {}
@@ -219,6 +301,71 @@ impl Dispatch<WlSeat, ()> for TabletState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<WlPointer, ()> for TabletState {
+    fn event(
+        _: &mut Self,
+        _: &WlPointer,
+        event: wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let _ = event;
+    }
+}
+
+impl Dispatch<ZwpPointerGesturesV1, ()> for TabletState {
+    fn event(
+        _: &mut Self,
+        _: &ZwpPointerGesturesV1,
+        event: zwp_pointer_gestures_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let _ = event;
+    }
+}
+
+impl Dispatch<ZwpPointerGesturePinchV1, ()> for TabletState {
+    fn event(
+        state: &mut Self,
+        _: &ZwpPointerGesturePinchV1,
+        event: zwp_pointer_gesture_pinch_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_pointer_gesture_pinch_v1::Event::Begin { fingers, .. } => {
+                if fingers >= 2 {
+                    state.pinching = true;
+                    state.pinch_last_scale = 1.0;
+                }
+            }
+            zwp_pointer_gesture_pinch_v1::Event::Update {
+                dx,
+                dy,
+                scale,
+                ..
+            } => {
+                let scale = scale as f32;
+                if state.pinch_last_scale > 0.05 {
+                    state.pinch_zoom *= scale / state.pinch_last_scale;
+                }
+                state.pinch_last_scale = scale;
+                state.pinch_pan += Vec2::new(dx as f32, dy as f32);
+                state.pinching = true;
+            }
+            zwp_pointer_gesture_pinch_v1::Event::End { .. } => {
+                state.pinching = false;
+                state.pinch_last_scale = 0.0;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -294,11 +441,16 @@ impl Dispatch<ZwpTabletToolV2, ()> for TabletState {
                 }
                 state.in_proximity = false;
                 state.stylus_btn = false;
+                state.stylus2_btn = false;
+                state.stylus_btn_saw_down = false;
                 state.pressure = None;
             }
             zwp_tablet_tool_v2::Event::Down { .. } => {
                 state.down = true;
                 state.pressed = true;
+                if state.stylus_btn {
+                    state.stylus_btn_saw_down = true;
+                }
             }
             zwp_tablet_tool_v2::Event::Up => {
                 state.down = false;
@@ -319,8 +471,24 @@ impl Dispatch<ZwpTabletToolV2, ()> for TabletState {
             }
             zwp_tablet_tool_v2::Event::Button { button, state: st, .. } => {
                 let pressed = matches!(st, WEnum::Value(zwp_tablet_tool_v2::ButtonState::Pressed));
-                if button == BTN_STYLUS || button == BTN_STYLUS2 {
-                    state.stylus_btn = pressed;
+                if button == BTN_STYLUS {
+                    if pressed {
+                        state.stylus_btn = true;
+                        state.stylus_btn_saw_down = state.down;
+                    } else {
+                        if state.stylus_btn
+                            && !state.stylus_btn_saw_down
+                            && !state.down
+                            && state.in_proximity
+                            && !state.eraser_tool
+                        {
+                            state.air_toggle = true;
+                        }
+                        state.stylus_btn = false;
+                        state.stylus_btn_saw_down = false;
+                    }
+                } else if button == BTN_STYLUS2 {
+                    state.stylus2_btn = pressed;
                 }
             }
             zwp_tablet_tool_v2::Event::Removed => {

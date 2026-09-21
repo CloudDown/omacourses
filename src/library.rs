@@ -31,12 +31,55 @@ impl DockEdge {
     }
 }
 
+/// Comment la main touche la feuille.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HandMode {
+    /// Stylet écrit ; le doigt pousse la feuille.
+    #[default]
+    Stylus,
+    /// Le doigt (ou la souris) écrit.
+    Main,
+    /// Le doigt efface ; le stylet continue d’écrire.
+    Chiffon,
+}
+
+impl HandMode {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Stylus => Self::Main,
+            Self::Main => Self::Chiffon,
+            Self::Chiffon => Self::Stylus,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stylus => "stylet",
+            Self::Main => "main",
+            Self::Chiffon => "chiffon",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Stylus => "stylet écrit · doigt pousse",
+            Self::Main => "main · le doigt écrit",
+            Self::Chiffon => "chiffon · le doigt gomme",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Index {
     pub seeded: bool,
     pub notes: Vec<NoteMeta>,
     #[serde(default)]
     pub dock: DockEdge,
+    #[serde(default)]
+    pub hand: HandMode,
+    #[serde(default)]
+    pub fiche_pliee: bool,
 }
 
 #[derive(Clone, Debug)]

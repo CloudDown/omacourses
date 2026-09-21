@@ -39,7 +39,8 @@ Gestes (dans un cahier):
   e gomme (re-clic = zone)   l lasso   t texte
   [ ] épaisseur   1-9 encre   m papier
   + − zoom   0 / coins = taille écran
-  pincement ou ctrl+molette zoom
+  pavé tactile : pincer ou deux doigts (vertical) = zoom
+  pincement écran / ctrl+molette zoom
   espace+glisser panorama
   glisser la poignée de la trousse → haut / bas / côtés
   shift relâché après un trait ≈ forme (ligne, cercle, rectangle)

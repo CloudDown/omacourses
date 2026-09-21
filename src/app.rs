@@ -1445,27 +1445,51 @@ impl CahierApp {
     fn handle_camera(&mut self, ui: &Ui, resp: &Response, rect: Rect) {
         let space = ui.input(|i| i.key_down(Key::Space));
         let middle = ui.input(|i| i.pointer.middle_down());
-        let (zoom, pinch_pan, pinch_center, ctrl, scroll) = ui.input(|i| {
+        let pen = self.tablet.snapshot();
+        let (egui_zoom, pinch_center, ctrl, point_scroll, line_scroll, mt_pan) = ui.input(|i| {
             let mt = i.multi_touch();
+            let mut point = Vec2::ZERO;
+            let mut line = Vec2::ZERO;
+            for e in &i.events {
+                if let Event::MouseWheel { unit, delta, .. } = e {
+                    match unit {
+                        MouseWheelUnit::Point => point += *delta,
+                        MouseWheelUnit::Line | MouseWheelUnit::Page => line += *delta,
+                    }
+                }
+            }
             (
                 i.zoom_delta(),
-                mt.map(|m| m.translation_delta).unwrap_or(Vec2::ZERO),
                 mt.map(|m| m.center_pos),
                 i.modifiers.command,
-                i.raw_scroll_delta,
+                point,
+                line,
+                mt.map(|m| m.translation_delta).unwrap_or(Vec2::ZERO),
             )
         });
         let focus = pinch_center
             .or(resp.hover_pos())
             .unwrap_or(rect.center());
-        if (zoom - 1.0).abs() > 0.0005 {
-            self.camera.zoom_at(focus, rect, zoom);
+
+        if pen.pinching || (pen.pinch_zoom - 1.0).abs() > 0.0005 {
+            self.camera.zoom_at(focus, rect, pen.pinch_zoom);
+            self.camera.pan += pen.pinch_pan;
+        } else if (egui_zoom - 1.0).abs() > 0.0005 {
+            self.camera.zoom_at(focus, rect, egui_zoom);
+        } else if !ctrl && point_scroll != Vec2::ZERO {
+            // Pavé tactile : deux doigts. Vertical = zoom, horizontal = panorama.
+            if point_scroll.y.abs() >= point_scroll.x.abs() * 0.35 {
+                let f = (1.0 + point_scroll.y * 0.004).clamp(0.55, 1.85);
+                self.camera.zoom_at(focus, rect, f);
+            } else {
+                self.camera.pan += point_scroll;
+            }
+        } else if mt_pan != Vec2::ZERO {
+            self.camera.pan += mt_pan;
+        } else if !ctrl && resp.hovered() && line_scroll != Vec2::ZERO {
+            self.camera.pan += line_scroll;
         }
-        if pinch_pan != Vec2::ZERO {
-            self.camera.pan += pinch_pan;
-        } else if !ctrl && resp.hovered() && scroll != Vec2::ZERO {
-            self.camera.pan += scroll;
-        }
+
         let pan = space || middle;
         if pan && resp.dragged() {
             self.camera.pan += resp.drag_delta();
@@ -1474,7 +1498,10 @@ impl CahierApp {
 
     fn handle_tool(&mut self, ui: &Ui, resp: &Response, rect: Rect) {
         let space = ui.input(|i| i.key_down(Key::Space));
-        if space || ui.input(|i| i.pointer.middle_down()) || ui.input(|i| i.multi_touch().is_some())
+        if space
+            || ui.input(|i| i.pointer.middle_down())
+            || ui.input(|i| i.multi_touch().is_some())
+            || self.tablet.snapshot().pinching
         {
             return;
         }
