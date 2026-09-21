@@ -36,14 +36,14 @@ Two postures, one well in the pencil case (`k` to toggle). Picking up the stylus
 |---|---|---|
 | Writes | mouse | stylus |
 | Pan | space + drag, middle-click, trackpad | finger, two-finger drag |
-| Eraser | right-click hold, `e` | stylus button hold, air-click to toggle |
+| Eraser | right-click hold (last kind), `e` / `shift+e` | stylus button hold, air-click to toggle |
 | Undo | `ctrl+z` | two-finger tap |
 | Zoom | pinch, two-finger trackpad, `+` `−` | pinch |
 
 | | |
 |---|---|
 | `p` `b` `c` `h` | felt-tip, fountain pen, pencil, highlighter |
-| `e` / `shift+e` | eraser toggle / area eraser |
+| `e` / `shift+e` | sélection (whole stroke) / zone (under cursor) |
 | `l` `t` `i` | lasso, text, image |
 | `[` `]` `1-9` | thickness, ink |
 | `m` | cycle paper (blank, lined, grid, dotted, graph, slate) |

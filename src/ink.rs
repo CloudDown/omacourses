@@ -48,15 +48,15 @@ impl Tool {
 
     pub fn label(self) -> &'static str {
         match self {
-            Tool::Fineliner => "feutre",
-            Tool::Brush => "plume",
-            Tool::Pencil => "crayon",
-            Tool::Highlighter => "surligneur",
-            Tool::EraserStroke => "gomme trait",
-            Tool::EraserArea => "gomme zone",
-            Tool::Lasso => "lasso",
-            Tool::Text => "texte",
-            Tool::Image => "image",
+            Tool::Fineliner => "Pen",
+            Tool::Brush => "Brush",
+            Tool::Pencil => "Pencil",
+            Tool::Highlighter => "Highlighter",
+            Tool::EraserStroke => "sélection",
+            Tool::EraserArea => "zone",
+            Tool::Lasso => "Lasso",
+            Tool::Text => "Text",
+            Tool::Image => "Image",
         }
     }
 }
@@ -507,16 +507,14 @@ pub fn erase_area(stroke: &InkStroke, center: Pos2, radius: f32) -> Vec<InkStrok
     fragments
 }
 
-pub fn draw_ants(painter: &egui::Painter, min: Pos2, max: Pos2, t: f32, color: Color32) {
+pub fn draw_ants(painter: &egui::Painter, min: Pos2, max: Pos2, color: Color32) {
     let rect = egui::Rect::from_min_max(min, max).expand(4.0);
-    let phase = (t * 18.0) % 12.0;
     painter.rect_stroke(
         rect,
         0.0,
         EStroke::new(1.0_f32, color.gamma_multiply(0.85)),
         egui::StrokeKind::Outside,
     );
-    let _ = phase;
 }
 
 pub fn default_width(nib: Nib) -> f32 {

@@ -67,7 +67,7 @@ pub fn pages_pdf(note: &Note, look: &Look, media: &MediaLoader) -> Option<Vec<u8
         let pm = raster_page(note, i, look, 1.6, media)?;
         images.push((pm.width(), pm.height(), rgb_from_rgba(pm.data())));
     }
-    Some(simple_pdf(&note.title, &images))
+    Some(simple_pdf(&images))
 }
 
 pub struct MediaLoader {
@@ -302,7 +302,7 @@ fn rgb_from_rgba(data: &[u8]) -> Vec<u8> {
     out
 }
 
-fn simple_pdf(title: &str, pages: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
+fn simple_pdf(pages: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
     let mut body: Vec<u8> = Vec::new();
     let mut offsets = vec![0u32];
     let write_obj = |id: u32, payload: &[u8], body: &mut Vec<u8>, offsets: &mut Vec<u32>| {
@@ -388,7 +388,6 @@ fn simple_pdf(title: &str, pages: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
         cpay.extend_from_slice(content.as_bytes());
         cpay.extend_from_slice(b"endstream\n");
         write_obj(content_id, &cpay, &mut body, &mut offsets);
-        let _ = title;
     }
 
     let xref_at = body.len();

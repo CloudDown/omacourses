@@ -37,15 +37,15 @@ Examples:
 Gestes (dans un cahier):
   k  pupitre (clavier+souris) ↔ tablette (stylet+main)
   p feutre   b plume   c crayon   h surligneur
-  e gomme collée / reprise de l'encre   shift+e gomme zone
+  e gomme sélection   shift+e gomme zone
   l lasso   t texte   i image
   [ ] épaisseur   1-9 encre   m papier
   + − zoom   0 / coins = taille écran
-  pupitre : souris écrit · espace panorama · clic droit gomme
+  pupitre : souris écrit · espace panorama · clic droit = dernière gomme
   tablette : stylet écrit · doigt pousse · tap 2 doigts = annuler
   pavé tactile : pincer ou deux doigts (vertical) = zoom
   pincement écran / ctrl+molette zoom
-  bouton stylet = gomme (tenir)   clic en l'air = plume ↔ gomme
+  bouton stylet = dernière gomme (tenir)   clic en l'air = plume ↔ gomme
   2ᵉ bouton = lasso (tenir)
   glisser la poignée de la trousse → haut / bas / côtés
   shift relâché après un trait ≈ forme (ligne, cercle, rectangle)
@@ -91,13 +91,13 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 860.0])
             .with_min_inner_size([800.0, 560.0])
-            .with_title("Cahier")
+            .with_title("Notes")
             .with_app_id("com.clouddown.cahier"),
         vsync: false,
         ..Default::default()
     };
     eframe::run_native(
-        "Cahier",
+        "Notes",
         options,
         Box::new(|cc| Ok(Box::new(CahierApp::new(cc)))),
     )

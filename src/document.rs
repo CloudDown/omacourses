@@ -4,9 +4,12 @@ use egui::{Color32, Pos2, Vec2};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PAGE_W: f32 = 794.0;
-pub const PAGE_H: f32 = 1123.0;
+/// Feuille fixe, indépendante de la fenêtre (environ trois A4).
+pub const PAGE_W: f32 = 794.0 * 3.0;
+pub const PAGE_H: f32 = 1123.0 * 3.0;
 pub const PAGE_GAP: f32 = 56.0;
+/// À l’ouverture, on ne montre qu’un coin : `1/PAGE_SPAN` de la feuille.
+pub const PAGE_SPAN: f32 = 3.0;
 
 fn default_page_w() -> f32 {
     PAGE_W
@@ -29,12 +32,12 @@ pub enum PaperKind {
 impl PaperKind {
     pub fn label(self) -> &'static str {
         match self {
-            PaperKind::Blank => "vierge",
-            PaperKind::Lined => "ligné",
-            PaperKind::Grid => "quadrillé",
-            PaperKind::Dots => "pointé",
-            PaperKind::Millimetre => "millimétré",
-            PaperKind::Slate => "ardoise",
+            PaperKind::Blank => "Blank",
+            PaperKind::Lined => "Lined",
+            PaperKind::Grid => "Grid",
+            PaperKind::Dots => "Dots",
+            PaperKind::Millimetre => "Millimeter",
+            PaperKind::Slate => "Slate",
         }
     }
 
@@ -169,25 +172,6 @@ impl Note {
 
     pub fn page_size(&self) -> (f32, f32) {
         (self.page_w.max(1.0), self.page_h.max(1.0))
-    }
-
-    /// Agrandit la feuille pour coller au format de la fenêtre, sans recadrer l’encre.
-    pub fn grow_to_view(&mut self, avail: Vec2) -> bool {
-        let aw = avail.x.max(120.0);
-        let ah = avail.y.max(160.0);
-        let aspect = aw / ah;
-        let mut w = self.page_w.max(PAGE_W);
-        let mut h = self.page_h.max(PAGE_H);
-        let cur = w / h.max(1.0);
-        if aspect > cur + 0.001 {
-            w = (h * aspect).max(w);
-        } else if aspect < cur - 0.001 {
-            h = (w / aspect).max(h);
-        }
-        let changed = (w - self.page_w).abs() > 0.5 || (h - self.page_h).abs() > 0.5;
-        self.page_w = w;
-        self.page_h = h;
-        changed
     }
 
     pub fn touch(&mut self) {

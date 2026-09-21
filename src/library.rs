@@ -54,15 +54,15 @@ impl NoteMode {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Pupitre => "pupitre",
-            Self::Tablette => "tablette",
+            Self::Pupitre => "Desktop",
+            Self::Tablette => "Tablet",
         }
     }
 
     pub fn hint(self) -> &'static str {
         match self {
-            Self::Pupitre => "pupitre · clavier + souris",
-            Self::Tablette => "tablette · stylet + main",
+            Self::Pupitre => "Desktop · mouse & keyboard",
+            Self::Tablette => "Tablet · stylus & palm",
         }
     }
 

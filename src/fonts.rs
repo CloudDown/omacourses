@@ -34,16 +34,6 @@ pub fn install(ctx: &egui::Context) {
             .insert(FontFamily::Name("serif".into()), vec!["serif".into()]);
     }
 
-    if let Some(data) = load_first(&["/usr/share/fonts/liberation/LiberationSerif-Italic.ttf"]) {
-        fonts
-            .font_data
-            .insert("serif-italic".into(), Arc::new(FontData::from_owned(data)));
-        fonts.families.insert(
-            FontFamily::Name("serif-italic".into()),
-            vec!["serif-italic".into()],
-        );
-    }
-
     ctx.set_fonts(fonts);
 }
 

@@ -11,7 +11,6 @@ use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, Style, Visuals};
 pub struct ThemeStamp {
     pub slug: String,
     pub colors_mtime: Option<SystemTime>,
-    pub font_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -40,11 +39,9 @@ pub struct Look {
 impl Look {
     pub fn load() -> Self {
         let (table, slug, name, mtime) = load_omarchy_colors();
-        let font_file = crate::fonts::mono_file();
         let stamp = ThemeStamp {
             slug: slug.clone(),
             colors_mtime: mtime,
-            font_file,
         };
         Self::from_table(table.as_ref(), name, stamp)
     }
@@ -74,7 +71,6 @@ impl Look {
             g("dark_foreground", Color32::from_rgb(0x56, 0x5f, 0x89)),
         );
         let muted = g("muted", Color32::from_rgb(0x41, 0x48, 0x68));
-        let _selection = g("selection", lighter);
         let red = g("red", Color32::from_rgb(0xf7, 0x76, 0x8e));
         let orange = g("orange", Color32::from_rgb(0xeb, 0x92, 0x7b));
         let yellow = g("yellow", Color32::from_rgb(0xe0, 0xaf, 0x68));
