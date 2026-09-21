@@ -127,20 +127,25 @@ impl TabletBridge {
         }
     }
 
-    pub fn pump(&mut self, frame: &eframe::Frame) {
-        if self.dead {
+    pub fn ready(&self) -> bool {
+        self.inner.is_some() && !self.dead
+    }
+
+    /// Attache le `wl_display` (une fois). Appeler depuis `update` avec le `Frame`.
+    pub fn ensure(&mut self, frame: &eframe::Frame) {
+        if self.dead || self.inner.is_some() {
             return;
         }
-        if self.inner.is_none() {
-            match unsafe { attach(frame) } {
-                Ok(inner) => {
-                    self.inner = Some(inner);
-                }
-                Err(()) => {
-                    self.dead = true;
-                    return;
-                }
-            }
+        match unsafe { attach(frame) } {
+            Ok(inner) => self.inner = Some(inner),
+            Err(()) => self.dead = true,
+        }
+    }
+
+    /// Lit les événements Wayland. Appeler depuis `raw_input_hook` (avant egui).
+    pub fn pump_events(&mut self) {
+        if self.dead {
+            return;
         }
         let Some(inner) = self.inner.as_mut() else {
             return;
@@ -158,6 +163,12 @@ impl TabletBridge {
             return;
         }
         let _ = inner.conn.flush();
+    }
+
+    #[allow(dead_code)]
+    pub fn pump(&mut self, frame: &eframe::Frame) {
+        self.ensure(frame);
+        self.pump_events();
     }
 
     pub fn snapshot(&self) -> PenSnapshot {

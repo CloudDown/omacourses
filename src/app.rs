@@ -100,6 +100,10 @@ pub struct CahierApp {
     live_from_pen: bool,
     /// Évite de rebasculer en tablette tant que le stylet reste en proximité.
     prox_flipped: bool,
+    /// Curseur souris masqué (stylet en proximité).
+    cursor_off: bool,
+    /// Stylet était en proximité la frame d’avant (pour PointerGone).
+    pen_was_prox: bool,
 }
 
 impl CahierApp {
@@ -151,6 +155,8 @@ impl CahierApp {
             tablet: TabletBridge::new(),
             live_from_pen: false,
             prox_flipped: false,
+            cursor_off: false,
+            pen_was_prox: false,
         };
         if let Ok(q) = std::env::var("CAHIER_OPEN") {
             let q = q.trim().to_lowercase();
@@ -440,8 +446,19 @@ impl CahierApp {
 }
 
 impl eframe::App for CahierApp {
+    fn raw_input_hook(&mut self, ctx: &Context, raw_input: &mut egui::RawInput) {
+        if self.tablet.ready() {
+            self.tablet.pump_events();
+            self.inject_pen_pointer(ctx, raw_input);
+        }
+    }
+
     fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
-        self.tablet.pump(frame);
+        self.tablet.ensure(frame);
+        // Première attach : repaint pour que le hook lise les events au prochain tour.
+        if self.tablet.ready() && !self.tablet.wants_repaint() {
+            // no-op — wants_repaint couvre proximité
+        }
         let pen = self.tablet.snapshot();
         if let Some(p) = pen.pressure {
             self.pressure.push_touch(p);
@@ -495,6 +512,9 @@ impl eframe::App for CahierApp {
                 self.toast = None;
             }
         }
+
+        self.sync_pen_cursor(ctx);
+
         let focused = ctx.input(|i| i.focused);
         let busy = self.live.is_some()
             || !self.lasso.is_empty()
@@ -502,7 +522,9 @@ impl eframe::App for CahierApp {
             || !self.sel.is_empty()
             || self.dock_float.is_some()
             || wants_pen
-            || self.toast.is_some();
+            || self.toast.is_some()
+            || pen.in_proximity
+            || pen.down;
         if busy && focused {
             ctx.request_repaint();
         } else {
@@ -1435,6 +1457,7 @@ impl CahierApp {
             .frame(Frame::NONE.fill(self.look.desk))
             .show(ctx, |ui| {
                 let bar = ui.max_rect();
+                ctx.data_mut(|d| d.insert_temp(Id::new("top-rect"), bar));
                 ui.painter().hline(
                     bar.x_range(),
                     bar.max.y - 0.5,
@@ -2127,8 +2150,11 @@ impl CahierApp {
         }
         if ui.ctx().data(|d| {
             d.get_temp::<Rect>(Id::new("dock-rect"))
-                .map(|r| r.expand(4.0).contains(screen))
+                .map(|r| r.expand(6.0).contains(screen))
                 .unwrap_or(false)
+                || d.get_temp::<Rect>(Id::new("top-rect"))
+                    .map(|r| r.expand(2.0).contains(screen))
+                    .unwrap_or(false)
         }) {
             if self.live.is_some() && (primary_released || !primary_down) {
                 self.finish_live(shift, time);
@@ -2773,6 +2799,10 @@ impl CahierApp {
     }
 
     fn cursor_for_tool(&self, ui: &Ui, resp: &Response) {
+        if self.cursor_off {
+            ui.ctx().set_cursor_icon(CursorIcon::None);
+            return;
+        }
         if !resp.hovered() {
             return;
         }
@@ -2783,11 +2813,6 @@ impl CahierApp {
             } else {
                 CursorIcon::Grab
             });
-            return;
-        }
-        let pen = self.tablet.snapshot();
-        if self.is_tablette() && pen.in_proximity {
-            ui.ctx().set_cursor_icon(CursorIcon::None);
             return;
         }
         if self.is_tablette() && self.finger_alive(ui) {
@@ -2802,6 +2827,71 @@ impl CahierApp {
             _ => CursorIcon::Crosshair,
         };
         ui.ctx().set_cursor_icon(icon);
+    }
+
+    fn pen_over_chrome(ctx: &Context, pos: Pos2) -> bool {
+        ctx.data(|d| {
+            d.get_temp::<Rect>(Id::new("dock-rect"))
+                .map(|r| r.expand(8.0).contains(pos))
+                .unwrap_or(false)
+                || d.get_temp::<Rect>(Id::new("top-rect"))
+                    .map(|r| r.expand(4.0).contains(pos))
+                    .unwrap_or(false)
+        })
+    }
+
+    /// Stylet → pointeur egui : hover + clics sur la chrome (trousse, règle, étagère).
+    fn inject_pen_pointer(&mut self, ctx: &Context, raw: &mut egui::RawInput) {
+        let pen = self.tablet.snapshot();
+        if pen.in_proximity || pen.down {
+            if let Some(pos) = pen.pos {
+                raw.events.push(Event::PointerMoved(pos));
+                // Sur l’étagère : tout clic. Sur le pupitre : chrome seulement
+                // (la feuille reste gérée par le pont tablette).
+                let ui_click = match self.scene {
+                    Scene::Shelf { .. } => true,
+                    Scene::Desk => Self::pen_over_chrome(ctx, pos),
+                };
+                if ui_click {
+                    let mods = raw.modifiers;
+                    if pen.pressed {
+                        raw.events.push(Event::PointerButton {
+                            pos,
+                            button: PointerButton::Primary,
+                            pressed: true,
+                            modifiers: mods,
+                        });
+                    }
+                    if pen.released {
+                        raw.events.push(Event::PointerButton {
+                            pos,
+                            button: PointerButton::Primary,
+                            pressed: false,
+                            modifiers: mods,
+                        });
+                    }
+                }
+            }
+            self.pen_was_prox = true;
+        } else if self.pen_was_prox {
+            raw.events.push(Event::PointerGone);
+            self.pen_was_prox = false;
+        }
+    }
+
+    fn sync_pen_cursor(&mut self, ctx: &Context) {
+        let pen = self.tablet.snapshot();
+        let hide = pen.in_proximity || pen.down;
+        if hide {
+            ctx.set_cursor_icon(CursorIcon::None);
+            if !self.cursor_off {
+                ctx.send_viewport_cmd(ViewportCommand::CursorVisible(false));
+                self.cursor_off = true;
+            }
+        } else if self.cursor_off {
+            ctx.send_viewport_cmd(ViewportCommand::CursorVisible(true));
+            self.cursor_off = false;
+        }
     }
 
     fn texture_for(&mut self, ctx: &Context, note_id: &Uuid, file: &str) -> Option<TextureHandle> {
