@@ -1,18 +1,18 @@
 # Cahier
 
-Notes au stylet, comme Samsung Notes / Apple Notes, posées sur un **pupitre Omarchy**.
+Stylus notes, like Samsung Notes / Apple Notes, sitting on an **Omarchy lectern**.
 
-Deux objets : l’**étagère** (dos de cahiers) et la **feuille** (papier, trousse, règle). Le chrome suit le thème Omarchy actif ; le papier reste du papier.
+Two objects: the **shelf** (notebook spines) and the **page** (paper, pencil case, ruler). Chrome follows the active Omarchy theme; paper stays paper.
 
-Données locales uniquement — `~/.local/share/omacourses`. Pas de compte, pas de sync.
+Local data only — `~/.local/share/omacourses`. No account, no sync.
 
-![Étagère — dos de cahiers](docs/screens/etagere.png)
+![Shelf — notebook spines](docs/screens/etagere.png)
 
-![Feuille lignée — Mentalité](docs/screens/feuille.png)
+![Lined page — Mentalité](docs/screens/feuille.png)
 
-![Papier millimétré — Direction artistique](docs/screens/millimetre.png)
+![Graph paper — Direction artistique](docs/screens/millimetre.png)
 
-## Lancer
+## Run
 
 ```bash
 cargo run --release
@@ -20,40 +20,30 @@ cahier --help
 cahier --data-dir
 ```
 
-Binaire : `cahier`. Données : `~/.local/share/omacourses` (ou `$CAHIER_DATA`).
+Binary: `cahier`. Data: `~/.local/share/omacourses` (or `$CAHIER_DATA`).
 
 ```bash
-CAHIER_OPEN=Mentalité cahier   # ouvre un cahier par titre
+CAHIER_OPEN=Mentalité cahier   # open a notebook by title
 ```
 
-Thème lu depuis `omarchy theme current` / `colors.toml`.
+Theme read from `omarchy theme current` / `colors.toml`.
 
-## Gestes
+## Gestures
 
 | | |
 |---|---|
-| `p` `b` `c` `h` | feutre, plume, crayon, surligneur |
-| `e` | gomme collée / reprise de l’encre |
-| `shift+e` | gomme zone |
-| `l` `t` `i` | lasso, texte, image |
-| `[` `]` `1-9` | épaisseur, encre |
-| `m` | cycle papier (vierge, ligné, quadrillé, pointé, millimétré, ardoise) |
-| doigt (mode stylet) | panorama |
-| espace + glisser | panorama |
-| deux doigts | panorama · tap = annuler |
-| `+` `−` · boutons · pincement · deux doigts sur le pad · ctrl + molette | zoom |
-| coins / `0` / clic sur le % | taille écran |
-| bouton du stylet (tenir) | gomme |
-| clic bouton en l’air | dernier feutre ↔ gomme |
-| 2ᵉ bouton (tenir) | lasso |
-| clic droit | gomme |
-| shift en relâchant un trait | ligne / cercle / rectangle |
+| `p` `b` `c` `h` | felt-tip, fountain pen, pencil, highlighter |
+| `e` / `shift+e` | stroke eraser / area eraser |
+| `l` `t` `i` | lasso, text, image |
+| `[` `]` `1-9` | thickness, ink |
+| `m` | cycle paper (blank, lined, grid, dotted, graph, slate) |
+| space + drag, two fingers | pan |
+| `+` `−` · buttons · pinch · two fingers on trackpad · ctrl + scroll | zoom |
+| corners / `0` / click on % | fit to screen |
+| right-click | eraser |
+| shift while releasing a stroke | line / circle / rectangle |
 | `ctrl+z` `ctrl+e` `ctrl+shift+e` | undo, PNG, PDF |
 
-Trois modes dans la trousse (puits à côté des plumes) : **stylet** (défaut — le doigt pousse la feuille), **main** (le doigt écrit), **chiffon** (le doigt gomme). La paume est ignorée dès que le stylet est en proximité.
+Stylus: pressure via touch events if the compositor sends them; otherwise the fountain pen simulates pressure from speed. **Stylus** mode in the pencil case ignores the palm.
 
-La gomme de la trousse : tap = coller / recoller l’encre ; appui long = trait ↔ zone.
-
-Sur l’étagère, une **fiche** (page arrachée) rappelle ces gestes — tap pour la replier.
-
-Premier lancement : cahiers *Mentalité* et *Direction artistique*.
+First launch: notebooks *Mentalité* and *Direction artistique*.
