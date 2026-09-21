@@ -36,11 +36,15 @@ Examples:
 
 Gestes (dans un cahier):
   p feutre   b plume   c crayon   h surligneur
-  e gomme (re-clic = zone)   l lasso   t texte
+  e gomme collée / reprise de l'encre   shift+e gomme zone
+  l lasso   t texte   i image
   [ ] épaisseur   1-9 encre   m papier
   + − zoom   0 / coins = taille écran
+  doigt (mode stylet) panorama   2 doigts panorama · tap = annuler
   pavé tactile : pincer ou deux doigts (vertical) = zoom
   pincement écran / ctrl+molette zoom
+  bouton stylet = gomme (tenir)   clic en l'air = plume ↔ gomme
+  2ᵉ bouton = lasso (tenir)
   espace+glisser panorama
   glisser la poignée de la trousse → haut / bas / côtés
   shift relâché après un trait ≈ forme (ligne, cercle, rectangle)

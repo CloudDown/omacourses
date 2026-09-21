@@ -33,17 +33,27 @@ Thème lu depuis `omarchy theme current` / `colors.toml`.
 | | |
 |---|---|
 | `p` `b` `c` `h` | feutre, plume, crayon, surligneur |
-| `e` / `shift+e` | gomme trait / zone |
+| `e` | gomme collée / reprise de l’encre |
+| `shift+e` | gomme zone |
 | `l` `t` `i` | lasso, texte, image |
 | `[` `]` `1-9` | épaisseur, encre |
 | `m` | cycle papier (vierge, ligné, quadrillé, pointé, millimétré, ardoise) |
-| espace + glisser, deux doigts | panorama |
+| doigt (mode stylet) | panorama |
+| espace + glisser | panorama |
+| deux doigts | panorama · tap = annuler |
 | `+` `−` · boutons · pincement · deux doigts sur le pad · ctrl + molette | zoom |
 | coins / `0` / clic sur le % | taille écran |
+| bouton du stylet (tenir) | gomme |
+| clic bouton en l’air | dernier feutre ↔ gomme |
+| 2ᵉ bouton (tenir) | lasso |
 | clic droit | gomme |
 | shift en relâchant un trait | ligne / cercle / rectangle |
 | `ctrl+z` `ctrl+e` `ctrl+shift+e` | undo, PNG, PDF |
 
-Stylet : pression via événements tactiles si le compositeur les envoie ; sinon la plume simule la pression par la vitesse. Mode **stylet** dans la trousse ignore la paume.
+Trois modes dans la trousse (puits à côté des plumes) : **stylet** (défaut — le doigt pousse la feuille), **main** (le doigt écrit), **chiffon** (le doigt gomme). La paume est ignorée dès que le stylet est en proximité.
+
+La gomme de la trousse : tap = coller / recoller l’encre ; appui long = trait ↔ zone.
+
+Sur l’étagère, une **fiche** (page arrachée) rappelle ces gestes — tap pour la replier.
 
 Premier lancement : cahiers *Mentalité* et *Direction artistique*.
