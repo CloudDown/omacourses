@@ -30,20 +30,25 @@ Theme read from `omarchy theme current` / `colors.toml`.
 
 ## Gestures
 
+Two postures, one well in the pencil case (`k` to toggle). Picking up the stylus switches to tablet.
+
+| | **Lectern** (keyboard + mouse) | **Tablet** (stylus + hand) |
+|---|---|---|
+| Writes | mouse | stylus |
+| Pan | space + drag, middle-click, trackpad | finger, two-finger drag |
+| Eraser | right-click hold, `e` | stylus button hold, air-click to toggle |
+| Undo | `ctrl+z` | two-finger tap |
+| Zoom | pinch, two-finger trackpad, `+` `−` | pinch |
+
 | | |
 |---|---|
 | `p` `b` `c` `h` | felt-tip, fountain pen, pencil, highlighter |
-| `e` / `shift+e` | stroke eraser / area eraser |
+| `e` / `shift+e` | eraser toggle / area eraser |
 | `l` `t` `i` | lasso, text, image |
 | `[` `]` `1-9` | thickness, ink |
 | `m` | cycle paper (blank, lined, grid, dotted, graph, slate) |
-| space + drag, two fingers | pan |
-| `+` `−` · buttons · pinch · two fingers on trackpad · ctrl + scroll | zoom |
 | corners / `0` / click on % | fit to screen |
-| right-click | eraser |
 | shift while releasing a stroke | line / circle / rectangle |
-| `ctrl+z` `ctrl+e` `ctrl+shift+e` | undo, PNG, PDF |
-
-Stylus: pressure via touch events if the compositor sends them; otherwise the fountain pen simulates pressure from speed. **Stylus** mode in the pencil case ignores the palm.
+| `ctrl+e` `ctrl+shift+e` | PNG, PDF |
 
 First launch: notebooks *Mentalité* and *Direction artistique*.

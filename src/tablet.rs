@@ -152,13 +152,10 @@ impl TabletBridge {
         inner.state.pinch_zoom = 1.0;
         inner.state.pinch_pan = Vec2::ZERO;
         let _ = inner.conn.flush();
-        match inner.queue.dispatch_pending(&mut inner.state) {
-            Ok(_) => {}
-            Err(_) => {
-                self.dead = true;
-                self.inner = None;
-                return;
-            }
+        if inner.queue.dispatch_pending(&mut inner.state).is_err() {
+            self.dead = true;
+            self.inner = None;
+            return;
         }
         let _ = inner.conn.flush();
     }

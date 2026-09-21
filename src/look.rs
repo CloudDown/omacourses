@@ -74,7 +74,7 @@ impl Look {
             g("dark_foreground", Color32::from_rgb(0x56, 0x5f, 0x89)),
         );
         let muted = g("muted", Color32::from_rgb(0x41, 0x48, 0x68));
-        let selection = g("selection", lighter);
+        let _selection = g("selection", lighter);
         let red = g("red", Color32::from_rgb(0xf7, 0x76, 0x8e));
         let orange = g("orange", Color32::from_rgb(0xeb, 0x92, 0x7b));
         let yellow = g("yellow", Color32::from_rgb(0xe0, 0xaf, 0x68));
@@ -89,14 +89,14 @@ impl Look {
         } else {
             Color32::from_rgb(0xff, 0xfc, 0xf5)
         };
-        let paper_rule = mix(paper, muted, 0.22);
-        let paper_rule_strong = mix(paper, accent, 0.28);
         let ink = if dark {
             Color32::from_rgb(0x1c, 0x18, 0x14)
         } else {
             Color32::from_rgb(0x22, 0x1c, 0x16)
         };
-        let punch = mix(paper, muted, 0.12);
+        let paper_rule = mix(paper, ink, 0.16);
+        let paper_rule_strong = mix(paper, ink, 0.30);
+        let punch = mix(paper, ink, 0.10);
 
         let inks = vec![
             ink,
@@ -118,7 +118,10 @@ impl Look {
             wash(cyan),
             wash(orange),
         ];
-        let cloth = vec![brown, red, green, blue, magenta, orange, cyan, darker];
+        let cloth = vec![brown, red, green, blue, magenta, orange, cyan, darker]
+            .into_iter()
+            .map(leather)
+            .collect();
 
         Self {
             name,
@@ -126,7 +129,7 @@ impl Look {
             desk: background,
             desk_deep: dark_background,
             desk_edge: lighter,
-            muted: selection,
+            muted,
             fg,
             fg_dim,
             accent,
@@ -336,6 +339,18 @@ fn pretty_name(slug: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn leather(c: Color32) -> Color32 {
+    let lum = 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
+    let umber = Color32::from_rgb(0x3a, 0x27, 0x22);
+    let t = if lum < 48.0 { 0.18 } else { 0.42 };
+    let pulled = mix(c, umber, t);
+    Color32::from_rgb(
+        (pulled.r() as f32 * 0.90) as u8,
+        (pulled.g() as f32 * 0.90) as u8,
+        (pulled.b() as f32 * 0.90) as u8,
+    )
 }
 
 fn mix(a: Color32, b: Color32, t: f32) -> Color32 {

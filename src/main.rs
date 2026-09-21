@@ -35,20 +35,21 @@ Examples:
   cahier --data-dir
 
 Gestes (dans un cahier):
+  k  pupitre (clavier+souris) ↔ tablette (stylet+main)
   p feutre   b plume   c crayon   h surligneur
   e gomme collée / reprise de l'encre   shift+e gomme zone
   l lasso   t texte   i image
   [ ] épaisseur   1-9 encre   m papier
   + − zoom   0 / coins = taille écran
-  doigt (mode stylet) panorama   2 doigts panorama · tap = annuler
+  pupitre : souris écrit · espace panorama · clic droit gomme
+  tablette : stylet écrit · doigt pousse · tap 2 doigts = annuler
   pavé tactile : pincer ou deux doigts (vertical) = zoom
   pincement écran / ctrl+molette zoom
   bouton stylet = gomme (tenir)   clic en l'air = plume ↔ gomme
   2ᵉ bouton = lasso (tenir)
-  espace+glisser panorama
   glisser la poignée de la trousse → haut / bas / côtés
   shift relâché après un trait ≈ forme (ligne, cercle, rectangle)
-  clic droit = gomme   ctrl+z/y   ctrl+e png   ctrl+shift+e pdf
+  ctrl+z/y   ctrl+e png   ctrl+shift+e pdf
 ";
 
 fn main() -> eframe::Result<()> {
@@ -92,7 +93,7 @@ fn main() -> eframe::Result<()> {
             .with_min_inner_size([800.0, 560.0])
             .with_title("Cahier")
             .with_app_id("com.clouddown.cahier"),
-        vsync: true,
+        vsync: false,
         ..Default::default()
     };
     eframe::run_native(

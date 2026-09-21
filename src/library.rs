@@ -31,42 +31,43 @@ impl DockEdge {
     }
 }
 
-/// Comment la main touche la feuille.
+/// Posture du pupitre : clavier+souris, ou stylet+main.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum HandMode {
-    /// Stylet écrit ; le doigt pousse la feuille.
+pub enum NoteMode {
+    /// Souris écrit, clavier pilote, espace panorama.
     #[default]
-    Stylus,
-    /// Le doigt (ou la souris) écrit.
-    Main,
-    /// Le doigt efface ; le stylet continue d’écrire.
-    Chiffon,
+    #[serde(alias = "main")]
+    Pupitre,
+    /// Stylet écrit, doigt pousse la feuille.
+    #[serde(alias = "stylus", alias = "chiffon")]
+    Tablette,
 }
 
-impl HandMode {
-    pub fn cycle(self) -> Self {
+impl NoteMode {
+    pub fn other(self) -> Self {
         match self {
-            Self::Stylus => Self::Main,
-            Self::Main => Self::Chiffon,
-            Self::Chiffon => Self::Stylus,
+            Self::Pupitre => Self::Tablette,
+            Self::Tablette => Self::Pupitre,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Stylus => "stylet",
-            Self::Main => "main",
-            Self::Chiffon => "chiffon",
+            Self::Pupitre => "pupitre",
+            Self::Tablette => "tablette",
         }
     }
 
     pub fn hint(self) -> &'static str {
         match self {
-            Self::Stylus => "stylet écrit · doigt pousse",
-            Self::Main => "main · le doigt écrit",
-            Self::Chiffon => "chiffon · le doigt gomme",
+            Self::Pupitre => "pupitre · clavier + souris",
+            Self::Tablette => "tablette · stylet + main",
         }
+    }
+
+    pub fn is_tablette(self) -> bool {
+        matches!(self, Self::Tablette)
     }
 }
 
@@ -76,8 +77,8 @@ pub struct Index {
     pub notes: Vec<NoteMeta>,
     #[serde(default)]
     pub dock: DockEdge,
-    #[serde(default)]
-    pub hand: HandMode,
+    #[serde(default, alias = "hand")]
+    pub mode: NoteMode,
     /// `true` = tuto fermé (bouton seul).
     #[serde(default = "default_true")]
     pub fiche_pliee: bool,
@@ -93,7 +94,7 @@ impl Default for Index {
             seeded: false,
             notes: Vec::new(),
             dock: DockEdge::default(),
-            hand: HandMode::default(),
+            mode: NoteMode::default(),
             fiche_pliee: true,
         }
     }

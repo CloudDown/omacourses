@@ -13,17 +13,17 @@ use crate::ink::{
     default_width, draw_ants, erase_area, map_mesh, maybe_snap_shape, mixed_pressure, InkPoint,
     InkStroke, Nib, Tool,
 };
-use crate::library::{ensure_png, image_size, DockEdge, HandMode, Library};
+use crate::library::{ensure_png, image_size, DockEdge, Library, NoteMode};
 use crate::look::Look;
 use crate::pressure::Pressure;
 use crate::seed;
 use crate::tablet::{PenSnapshot, TabletBridge};
 use crate::undo::UndoStack;
 
-const DOS_W: f32 = 168.0;
-const DOS_H: f32 = 148.0;
+const DOS_W: f32 = 128.0;
+const DOS_H: f32 = 172.0;
 const DOS_PAD: f32 = 14.0;
-const PAPER_PEEK: f32 = 56.0;
+const PAPER_PEEK: f32 = 36.0;
 const TITLE_BAND: f32 = 36.0;
 const ICON_ROW: f32 = 30.0;
 
@@ -96,6 +96,8 @@ pub struct CahierApp {
     canvas_rect: Rect,
     tablet: TabletBridge,
     live_from_pen: bool,
+    /// Évite de rebasculer en tablette tant que le stylet reste en proximité.
+    prox_flipped: bool,
 }
 
 impl CahierApp {
@@ -145,6 +147,7 @@ impl CahierApp {
             canvas_rect: Rect::ZERO,
             tablet: TabletBridge::new(),
             live_from_pen: false,
+            prox_flipped: false,
         };
         if let Ok(q) = std::env::var("CAHIER_OPEN") {
             let q = q.trim().to_lowercase();
@@ -363,9 +366,55 @@ impl CahierApp {
         self.tool = self.last_eraser;
     }
 
-    fn cycle_hand(&mut self) {
-        self.lib.index.hand = self.lib.index.hand.cycle();
+    fn mode(&self) -> NoteMode {
+        self.lib.index.mode
+    }
+
+    fn is_tablette(&self) -> bool {
+        self.mode().is_tablette()
+    }
+
+    fn slot(&self) -> f32 {
+        if self.is_tablette() {
+            44.0
+        } else {
+            34.0
+        }
+    }
+
+    fn set_mode(&mut self, mode: NoteMode) {
+        if self.lib.index.mode == mode {
+            return;
+        }
+        self.lib.index.mode = mode;
         self.lib.save_index();
+    }
+
+    fn toggle_mode(&mut self) {
+        self.set_mode(self.mode().other());
+    }
+
+    fn tool_key(tool: Tool) -> Option<&'static str> {
+        Some(match tool {
+            Tool::Fineliner => "p",
+            Tool::Brush => "b",
+            Tool::Pencil => "c",
+            Tool::Highlighter => "h",
+            Tool::EraserStroke | Tool::EraserArea => "e",
+            Tool::Lasso => "l",
+            Tool::Text => "t",
+            Tool::Image => "i",
+        })
+    }
+
+    fn tool_hover(&self, tool: Tool) -> String {
+        let lab = tool.label();
+        if !self.is_tablette() {
+            if let Some(k) = Self::tool_key(tool) {
+                return format!("{lab}  ·  {k}");
+            }
+        }
+        lab.to_string()
     }
 }
 
@@ -380,6 +429,17 @@ impl eframe::App for CahierApp {
         }
         if pen.in_proximity {
             self.palm_grace_until = Some(Instant::now() + Duration::from_millis(180));
+            if matches!(self.scene, Scene::Desk)
+                && !self.prox_flipped
+                && !self.is_tablette()
+            {
+                self.set_mode(NoteMode::Tablette);
+                self.prox_flipped = true;
+                let t = ctx.input(|i| i.time);
+                self.toast(NoteMode::Tablette.hint(), t);
+            }
+        } else {
+            self.prox_flipped = false;
         }
         if matches!(self.scene, Scene::Desk) && pen.air_toggle {
             self.toggle_eraser();
@@ -414,6 +474,7 @@ impl eframe::App for CahierApp {
                 self.toast = None;
             }
         }
+        let focused = ctx.input(|i| i.focused);
         let busy = self.live.is_some()
             || !self.lasso.is_empty()
             || self.dirty
@@ -421,7 +482,7 @@ impl eframe::App for CahierApp {
             || self.dock_float.is_some()
             || wants_pen
             || self.toast.is_some();
-        if busy {
+        if busy && focused {
             ctx.request_repaint();
         } else {
             ctx.request_repaint_after(std::time::Duration::from_millis(400));
@@ -446,12 +507,16 @@ impl ShowToast<'_> {
             .anchor(Align2::CENTER_TOP, vec2(0.0, 56.0))
             .show(ctx, |ui| {
                 Frame::NONE
-                    .fill(self.look.desk_deep)
-                    .corner_radius(20)
-                    .stroke(Stroke::new(1.0_f32, self.look.accent))
+                    .fill(self.look.paper)
+                    .corner_radius(3)
+                    .stroke(Stroke::new(1.0_f32, self.look.ink.gamma_multiply(0.18)))
                     .inner_margin(Margin::symmetric(16, 8))
                     .show(ui, |ui| {
-                        ui.label(RichText::new(msg).font(self.look.mono(13.0)).color(self.look.fg));
+                        ui.label(
+                            RichText::new(msg)
+                                .font(self.look.serif(15.0))
+                                .color(self.look.ink),
+                        );
                     });
             });
     }
@@ -488,6 +553,7 @@ impl CahierApp {
         let mut cycle_paper = false;
         let mut erase_toggle = false;
         let mut toggle_fiche = false;
+        let mut toggle_mode = false;
 
         let typing = ctx.wants_keyboard_input() || self.editing_text.is_some();
         ctx.input(|i| {
@@ -576,6 +642,9 @@ impl CahierApp {
                 }
                 if i.key_pressed(Key::M) {
                     cycle_paper = true;
+                }
+                if i.key_pressed(Key::K) {
+                    toggle_mode = true;
                 }
                 for (k, idx) in [
                     (Key::Num1, 0),
@@ -709,6 +778,13 @@ impl CahierApp {
             self.lib.index.fiche_pliee = !self.lib.index.fiche_pliee;
             self.lib.save_index();
         }
+        if toggle_mode {
+            if let Scene::Desk = self.scene {
+                self.toggle_mode();
+                let t = ctx.input(|i| i.time);
+                self.toast(self.mode().hint(), t);
+            }
+        }
     }
 
     fn push_snapshot(&mut self) {
@@ -809,8 +885,8 @@ impl CahierApp {
                                 .color(self.look.fg),
                         );
                         ui.label(
-                            RichText::new("pupitre · notes au stylet · mentalité omarchy")
-                                .font(self.look.mono(13.0))
+                            RichText::new("l'étagère")
+                                .font(self.look.serif(18.0))
                                 .color(self.look.fg_dim),
                         );
                     });
@@ -924,7 +1000,11 @@ impl CahierApp {
         Area::new(Id::new("fab-nouveau"))
             .anchor(Align2::RIGHT_BOTTOM, vec2(-28.0, -28.0))
             .show(ctx, |ui| {
-                if self.round_action(ui, 56.0, true, paint_plus) {
+                if self
+                    .inkwell(ui)
+                    .on_hover_text("nouveau cahier  ·  n")
+                    .clicked()
+                {
                     self.new_note();
                 }
             });
@@ -935,7 +1015,7 @@ impl CahierApp {
             .order(Order::Foreground)
             .show(ctx, |ui| {
                 if self
-                    .round_well(ui, 44.0, fiche_ouverte, paint_help)
+                    .round_well(ui, 44.0, false, paint_help)
                     .on_hover_text(if fiche_ouverte {
                         "fermer le tuto"
                     } else {
@@ -958,8 +1038,8 @@ impl CahierApp {
     }
 
     fn fiche_pupitre(&mut self, ui: &mut Ui) {
-        let w = 440.0_f32.min(ui.ctx().screen_rect().width() - 72.0).max(280.0);
-        let h = 172.0;
+        let w = 520.0_f32.min(ui.ctx().screen_rect().width() - 72.0).max(300.0);
+        let h = 196.0;
         let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
         let p = ui.painter_at(rect);
         let ink = self.look.ink;
@@ -993,37 +1073,53 @@ impl CahierApp {
         p.text(
             pos2(rect.min.x + 36.0, rect.min.y + 10.0),
             Align2::LEFT_TOP,
-            "sur le pupitre",
+            "deux postures",
             self.look.serif(18.0),
             ink,
         );
+        let y0 = rect.min.y + 36.0;
+        let col2 = (rect.min.x + 36.0 + (w - 52.0) * 0.50).min(rect.max.x - 240.0);
+        p.text(
+            pos2(rect.min.x + 36.0, y0),
+            Align2::LEFT_TOP,
+            "pupitre",
+            self.look.serif(14.0),
+            ink,
+        );
         let left = [
-            "stylet     écrit",
-            "doigt      pousse la feuille",
-            "2 doigts   panorama  ·  tap = annuler",
-            "pincement  zoom",
+            "souris      écrit",
+            "espace      panorama",
+            "clic droit  gomme (tenir)",
+            "e / p b c h outils",
+            "ctrl+z      annuler",
         ];
-        let right = [
-            "bouton 1      gomme (tenir)",
-            "clic en l'air plume ↔ gomme",
-            "bouton 2      lasso (tenir)",
-            "gomme trousse coller / recoller",
-        ];
-        let y0 = rect.min.y + 38.0;
         for (i, line) in left.iter().enumerate() {
             p.text(
-                pos2(rect.min.x + 36.0, y0 + i as f32 * 18.0),
+                pos2(rect.min.x + 36.0, y0 + 20.0 + i as f32 * 16.5),
                 Align2::LEFT_TOP,
                 *line,
                 self.look.mono(12.0),
                 mute,
             );
         }
-        let col2 = (rect.min.x + 36.0 + (w - 48.0) * 0.50).min(rect.max.x - 220.0);
-        if col2 > rect.min.x + 200.0 {
+        if col2 > rect.min.x + 180.0 {
+            p.text(
+                pos2(col2, y0),
+                Align2::LEFT_TOP,
+                "tablette",
+                self.look.serif(14.0),
+                ink,
+            );
+            let right = [
+                "stylet      écrit",
+                "doigt       pousse la feuille",
+                "2 doigts    tap = annuler",
+                "bouton 1    gomme · air = ↔",
+                "bouton 2    lasso (tenir)",
+            ];
             for (i, line) in right.iter().enumerate() {
                 p.text(
-                    pos2(col2, y0 + i as f32 * 18.0),
+                    pos2(col2, y0 + 20.0 + i as f32 * 16.5),
                     Align2::LEFT_TOP,
                     *line,
                     self.look.mono(12.0),
@@ -1034,7 +1130,7 @@ impl CahierApp {
         p.text(
             pos2(rect.min.x + 36.0, rect.max.y - 14.0),
             Align2::LEFT_CENTER,
-            "appui long gomme : trait ↔ zone   ·   puits main / chiffon   ·   e plume ↔ gomme",
+            "k  ou le puits dans la trousse  ·  le stylet bascule tout seul en tablette",
             self.look.mono(11.0),
             mute.gamma_multiply(0.85),
         );
@@ -1042,7 +1138,7 @@ impl CahierApp {
             p.rect_stroke(
                 rect,
                 CornerRadius::same(4),
-                Stroke::new(1.4_f32, self.look.accent),
+                Stroke::new(1.2_f32, ink.gamma_multiply(0.45)),
                 StrokeKind::Outside,
             );
         }
@@ -1063,10 +1159,6 @@ impl CahierApp {
         let id = Id::new("cahier-dos").with(meta.id);
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let over = pointer.is_some_and(|p| slot_rect.contains(p));
-        if over {
-            ui.ctx().request_repaint();
-        }
-
         let lift_t = ui.ctx().animate_bool_with_time(id.with("peek"), over, 0.36);
         let e = lift_t * lift_t * (3.0 - 2.0 * lift_t);
         let cloth = self.look.cloth_at(meta.cover);
@@ -1089,96 +1181,116 @@ impl CahierApp {
             ui.painter_at(slot_rect)
         };
 
-        // Title above the leather
-        let title_pos = pos2(face.min.x + 2.0, face.min.y - 22.0);
+        let title: String = {
+            let t = meta.title.as_str();
+            if t.chars().count() > 22 {
+                format!("{}…", t.chars().take(20).collect::<String>())
+            } else {
+                t.to_string()
+            }
+        };
         painter.text(
-            title_pos,
+            pos2(face.min.x + 2.0, face.min.y - 22.0),
             Align2::LEFT_BOTTOM,
-            &meta.title,
+            title,
             self.look.serif(16.0),
             self.look.fg,
         );
         let date = meta.updated.format("%d %b").to_string().to_lowercase();
         painter.text(
-            pos2(face.max.x - 2.0, face.min.y - 8.0),
-            Align2::RIGHT_BOTTOM,
+            pos2(face.min.x + 2.0, face.min.y - 6.0),
+            Align2::LEFT_BOTTOM,
             date,
             self.look.mono(10.0),
             self.look.fg_dim,
         );
-        if meta.pinned {
-            painter.circle_filled(
-                pos2(face.max.x - 6.0, face.min.y - 28.0),
-                3.2,
-                self.look.accent,
-            );
-        }
 
         painter.rect_filled(
-            face.translate(vec2(2.5, 4.0 + 2.0 * e)),
-            CornerRadius::same(12),
-            self.look.shadow.gamma_multiply(0.45 + 0.2 * e),
+            face.translate(vec2(3.0, 5.0 + 1.5 * e)),
+            CornerRadius::same(8),
+            self.look.shadow.gamma_multiply(0.40 + 0.18 * e),
         );
 
-        // Back panel (slightly taller)
-        let back = Rect::from_min_max(
-            pos2(face.min.x - 1.5, face.min.y - 6.0),
-            pos2(face.max.x + 1.5, face.max.y),
-        );
-        painter.rect_filled(back, CornerRadius::same(11), cloth_deep);
-
-        // Sliding sheet
-        let lip_y = face.min.y + 12.0;
+        // Hover: feuilles qui sortent du haut
         let peek = e * PAPER_PEEK;
-        let sheet = Rect::from_min_max(
-            pos2(face.min.x + 16.0, lip_y - peek),
-            pos2(face.max.x - 14.0, lip_y + 36.0),
-        );
-        painter.rect_filled(sheet, CornerRadius::same(2), paper);
-        if e > 0.12 {
-            let mut y = sheet.min.y + 12.0;
-            while y < lip_y - 3.0 {
-                painter.line_segment(
-                    [pos2(sheet.min.x + 7.0, y), pos2(sheet.max.x - 7.0, y)],
-                    Stroke::new(1.0_f32, self.look.paper_rule),
-                );
-                y += 11.0;
+        if peek > 1.0 {
+            let sheet = Rect::from_min_max(
+                pos2(face.min.x + 18.0, face.min.y - peek),
+                pos2(face.max.x - 8.0, face.min.y + 10.0),
+            );
+            painter.rect_filled(
+                sheet,
+                CornerRadius {
+                    nw: 2,
+                    ne: 2,
+                    sw: 0,
+                    se: 0,
+                },
+                paper,
+            );
+            if e > 0.2 {
+                let mut y = sheet.min.y + 10.0;
+                while y < face.min.y - 2.0 {
+                    painter.line_segment(
+                        [pos2(sheet.min.x + 6.0, y), pos2(sheet.max.x - 6.0, y)],
+                        Stroke::new(1.0_f32, self.look.paper_rule),
+                    );
+                    y += 10.0;
+                }
             }
         }
 
-        // Leather pocket — most of the silhouette
-        let front = Rect::from_min_max(pos2(face.min.x, lip_y), face.max);
-        let r = CornerRadius {
-            nw: 4,
-            ne: 4,
-            sw: 12,
-            se: 12,
-        };
-        painter.rect_filled(front, r, cloth);
-        // soft top shade on the pocket lip
+        painter.rect_filled(face, CornerRadius::same(8), cloth);
+        let spine = Rect::from_min_max(face.min, pos2(face.min.x + 13.0, face.max.y));
         painter.rect_filled(
-            Rect::from_min_max(front.min, pos2(front.max.x, front.min.y + 10.0)),
+            spine,
             CornerRadius {
-                nw: 4,
-                ne: 4,
-                sw: 0,
+                nw: 8,
+                ne: 0,
+                sw: 8,
                 se: 0,
             },
-            shade_rgb(cloth, 1.08).gamma_multiply(0.35),
+            cloth_deep,
         );
-        painter.rect_stroke(front, r, Stroke::new(1.0_f32, cloth_edge), StrokeKind::Inside);
-        // thin tab
-        let tab = Rect::from_min_size(pos2(face.min.x + 14.0, face.min.y - 1.0), vec2(44.0, 16.0));
-        painter.rect_filled(
-            tab,
-            CornerRadius {
-                nw: 6,
-                ne: 6,
-                sw: 0,
-                se: 0,
-            },
-            shade_rgb(cloth, 1.06),
+        painter.line_segment(
+            [
+                pos2(spine.max.x, face.min.y + 10.0),
+                pos2(spine.max.x, face.max.y - 10.0),
+            ],
+            Stroke::new(1.1_f32, cloth_edge),
         );
+        painter.rect_stroke(
+            face,
+            CornerRadius::same(8),
+            Stroke::new(1.0_f32, cloth_edge),
+            StrokeKind::Inside,
+        );
+        for i in 0..3 {
+            let o = i as f32 * 1.5;
+            painter.rect_filled(
+                Rect::from_min_max(
+                    pos2(face.max.x - 1.0 + o, face.min.y + 10.0),
+                    pos2(face.max.x + 2.2 + o, face.max.y - 10.0),
+                ),
+                CornerRadius::same(1),
+                shade_rgb(paper, 0.94 - i as f32 * 0.04),
+            );
+        }
+        if meta.pinned {
+            let x = face.max.x - 16.0;
+            let ribbon = [
+                pos2(x - 3.4, face.min.y),
+                pos2(x + 3.4, face.min.y),
+                pos2(x + 3.4, face.min.y + 26.0),
+                pos2(x, face.min.y + 31.0),
+                pos2(x - 3.4, face.min.y + 26.0),
+            ];
+            painter.add(Shape::convex_polygon(
+                ribbon.to_vec(),
+                self.look.accent,
+                Stroke::NONE,
+            ));
+        }
 
         let mut act = None;
         let show_icons = e > 0.08;
@@ -1291,16 +1403,6 @@ impl CahierApp {
         resp.clicked()
     }
 
-    fn round_action(
-        &self,
-        ui: &mut Ui,
-        size: f32,
-        accent: bool,
-        paint: impl FnOnce(&Painter, Pos2, Color32),
-    ) -> bool {
-        self.round_well(ui, size, accent, paint).clicked()
-    }
-
     fn round_well(
         &self,
         ui: &mut Ui,
@@ -1329,6 +1431,32 @@ impl CahierApp {
         resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
+    fn inkwell(&self, ui: &mut Ui) -> Response {
+        let size = 56.0;
+        let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+        let c = rect.center();
+        let p = ui.painter();
+        let well = if resp.hovered() {
+            self.look.desk_edge
+        } else {
+            self.look.desk_deep
+        };
+        p.circle_filled(c, 25.0, well);
+        p.circle_stroke(
+            c,
+            25.0,
+            Stroke::new(1.2_f32, self.look.muted.gamma_multiply(0.7)),
+        );
+        p.circle_filled(c, 16.5, shade_rgb(well, 0.72));
+        p.circle_stroke(
+            c,
+            16.5,
+            Stroke::new(1.0_f32, self.look.ink.gamma_multiply(0.35)),
+        );
+        paint_plus(p, c, self.look.paper);
+        resp.on_hover_cursor(CursorIcon::PointingHand)
+    }
+
     fn ui_desk(&mut self, ctx: &Context) {
         self.handle_drops_and_paste(ctx);
 
@@ -1337,6 +1465,12 @@ impl CahierApp {
             .show_separator_line(false)
             .frame(Frame::NONE.fill(self.look.desk))
             .show(ctx, |ui| {
+                let bar = ui.max_rect();
+                ui.painter().hline(
+                    bar.x_range(),
+                    bar.max.y - 0.5,
+                    Stroke::new(1.0_f32, self.look.desk_deep),
+                );
                 ui.horizontal_centered(|ui| {
                     ui.add_space(6.0);
                     if self
@@ -1402,6 +1536,7 @@ impl CahierApp {
                                 self.look.muted
                             };
                             let (r, lab) = ui.allocate_exact_size(vec2(46.0, 28.0), Sense::click());
+                            ui.painter().rect_filled(r, CornerRadius::same(8), self.look.desk_deep);
                             ui.painter().text(
                                 r.center(),
                                 Align2::CENTER_CENTER,
@@ -1543,9 +1678,14 @@ impl CahierApp {
             self.dock_moved = false;
         }
 
+        let slot = self.slot();
         if self
-            .round_well(ui, 36.0, false, paint_undo)
-            .on_hover_text("annuler")
+            .round_well(ui, slot, false, paint_undo)
+            .on_hover_text(if self.is_tablette() {
+                "annuler  ·  tap 2 doigts"
+            } else {
+                "annuler  ·  ctrl+z"
+            })
             .clicked()
         {
             let mut ok = false;
@@ -1557,8 +1697,12 @@ impl CahierApp {
             }
         }
         if self
-            .round_well(ui, 36.0, false, paint_redo)
-            .on_hover_text("rétablir")
+            .round_well(ui, slot, false, paint_redo)
+            .on_hover_text(if self.is_tablette() {
+                "rétablir"
+            } else {
+                "rétablir  ·  ctrl+y"
+            })
             .clicked()
         {
             let mut ok = false;
@@ -1603,9 +1747,15 @@ impl CahierApp {
                 self.tool.is_eraser() || pen.eraser,
             )
             .on_hover_text(if self.tool.is_eraser() {
-                "re-tap : reprise de l'encre · appui long : trait / zone"
-            } else {
+                if self.is_tablette() {
+                    "re-tap : reprise de l'encre · appui long : trait / zone"
+                } else {
+                    "re-clic : reprise de l'encre · clic droit : trait / zone  ·  e"
+                }
+            } else if self.is_tablette() {
                 "gomme · appui long : trait / zone"
+            } else {
+                "gomme  ·  e  ·  clic droit pour tenir"
             });
         if erase_resp.secondary_clicked() {
             self.cycle_eraser_kind();
@@ -1614,22 +1764,22 @@ impl CahierApp {
         }
         let lasso_resp = self
             .paint_tool_well(ui, Tool::Lasso, self.tool == Tool::Lasso || pen.lasso_btn)
-            .on_hover_text("lasso");
+            .on_hover_text(self.tool_hover(Tool::Lasso));
         if lasso_resp.clicked() {
             self.tool = Tool::Lasso;
         }
         self.dock_gap(ui, vertical);
-        let hand = self.lib.index.hand;
+        let mode = self.mode();
         if self
-            .round_well(ui, 36.0, hand != HandMode::Stylus, |p, c, fg| {
-                paint_hand(p, c, hand, fg)
+            .round_well(ui, slot, mode.is_tablette(), |p, c, fg| {
+                paint_mode(p, c, mode, fg)
             })
-            .on_hover_text(format!("{} — {}", hand.label(), hand.hint()))
+            .on_hover_text(format!("{}  ·  k", mode.label()))
             .clicked()
         {
-            self.cycle_hand();
+            self.toggle_mode();
             let t = ui.input(|i| i.time);
-            self.toast(self.lib.index.hand.hint(), t);
+            self.toast(self.mode().hint(), t);
         }
         self.dock_gap(ui, vertical);
         let high = self.tool == Tool::Highlighter;
@@ -1782,12 +1932,13 @@ impl CahierApp {
             tool,
             self.tool == tool || (tool.is_eraser() && self.tool.is_eraser()),
         )
-        .on_hover_text(tool.label())
+        .on_hover_text(self.tool_hover(tool))
         .clicked()
     }
 
     fn paint_tool_well(&self, ui: &mut Ui, tool: Tool, active: bool) -> Response {
-        let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 38.0), Sense::click());
+        let s = self.slot();
+        let (rect, resp) = ui.allocate_exact_size(vec2(s, s), Sense::click());
         let bg = if active {
             self.look.accent
         } else if resp.hovered() {
@@ -1803,7 +1954,7 @@ impl CahierApp {
         let p = ui.painter();
         let c = rect.center();
         if bg.a() > 0 {
-            p.circle_filled(c, 16.5, bg);
+            p.circle_filled(c, s * 0.43, bg);
         }
         paint_tool(p, tool, c, fg);
         resp.on_hover_cursor(CursorIcon::PointingHand)
@@ -1909,7 +2060,7 @@ impl CahierApp {
                 g.2 += (m.zoom_delta - 1.0).abs();
             }
         } else if let Some((t0, travel, zdev)) = self.two_finger.take() {
-            if time - t0 < 0.22 && travel < 14.0 && zdev < 0.05 {
+            if self.is_tablette() && time - t0 < 0.22 && travel < 14.0 && zdev < 0.05 {
                 if let Some(n) = &mut self.note {
                     if self.undo.undo(n) {
                         self.mark_dirty();
@@ -1919,8 +2070,12 @@ impl CahierApp {
         }
 
         let pen_busy = pen.down || pen.pressed || (self.live.is_some() && self.live_from_pen);
-        if self.lib.index.hand == HandMode::Stylus
-            && self.finger_alive(ui)
+        let finger_pan = if self.is_tablette() {
+            self.finger_alive(ui)
+        } else {
+            ui.input(|i| i.any_touches())
+        };
+        if finger_pan
             && mt.is_none()
             && !pen.pinching
             && !pen_busy
@@ -1945,12 +2100,13 @@ impl CahierApp {
         let pen = self.tablet.snapshot();
         let pen_ink =
             pen.down || pen.pressed || pen.released || (self.live.is_some() && self.live_from_pen);
-        let any_touch = self.finger_alive(ui);
+        let screen_touch = ui.input(|i| i.any_touches());
         if !pen_ink && self.live.is_none() {
-            if self.palm_guard(&pen) {
-                return;
-            }
-            if self.lib.index.hand == HandMode::Stylus && any_touch {
+            if self.is_tablette() {
+                if self.palm_guard(&pen) || self.finger_alive(ui) {
+                    return;
+                }
+            } else if screen_touch {
                 return;
             }
         }
@@ -2025,9 +2181,6 @@ impl CahierApp {
             tool = Tool::Lasso;
         } else if pen.eraser || secondary {
             tool = Tool::EraserStroke;
-        }
-        if !pen_ink && self.lib.index.hand == HandMode::Chiffon {
-            tool = Tool::EraserArea;
         }
 
         if tool.is_ink() && (primary_down || primary_pressed) && !resp.dragged_by(PointerButton::Middle) {
@@ -2402,25 +2555,31 @@ impl CahierApp {
             let min = map(Pos2::new(origin.x, origin.y));
             let max = map(Pos2::new(origin.x + note.page_w, origin.y + note.page_h));
             let paper = Rect::from_min_max(min, max);
-            painter.rect_filled(paper.translate(vec2(8.0, 10.0)), CornerRadius::same(22), self.look.shadow);
+            let sheet_r = CornerRadius::same(5);
+            painter.rect_filled(
+                paper.translate(vec2(3.0, 4.0)),
+                sheet_r,
+                self.look.shadow,
+            );
             let fill = if note.paper == PaperKind::Slate {
                 self.look.desk_deep
             } else {
                 self.look.paper
             };
-            painter.rect_filled(paper, CornerRadius::same(22), fill);
+            painter.rect_filled(paper, sheet_r, fill);
             self.paint_template(painter, paper, note.paper, cam.zoom);
-            self.paint_punches(painter, paper);
-            let fold = [
-                pos2(paper.max.x, paper.min.y),
-                pos2(paper.max.x - 22.0 * cam.zoom, paper.min.y),
-                pos2(paper.max.x, paper.min.y + 22.0 * cam.zoom),
-            ];
-            painter.add(Shape::convex_polygon(
-                fold.to_vec(),
-                self.look.paper_rule_strong,
-                Stroke::NONE,
-            ));
+            if note.paper == PaperKind::Lined {
+                self.paint_punches(painter, paper);
+            }
+            if note.paper != PaperKind::Slate {
+                let fold_c = self.look.paper_rule_strong;
+                let fold = [
+                    pos2(paper.max.x, paper.min.y),
+                    pos2(paper.max.x - 16.0 * cam.zoom, paper.min.y),
+                    pos2(paper.max.x, paper.min.y + 16.0 * cam.zoom),
+                ];
+                painter.add(Shape::convex_polygon(fold.to_vec(), fold_c, Stroke::NONE));
+            }
 
             for im in &page.images {
                 let r = Rect::from_min_size(
@@ -2464,11 +2623,11 @@ impl CahierApp {
             }
 
             painter.text(
-                pos2(paper.center().x, paper.max.y + 18.0 * cam.zoom.min(1.2)),
-                Align2::CENTER_TOP,
-                format!("{} / {}", pi + 1, note.pages.len()),
-                self.look.mono(11.0),
-                self.look.fg_dim,
+                pos2(paper.center().x, paper.max.y - 14.0 * cam.zoom.min(1.2)),
+                Align2::CENTER_BOTTOM,
+                format!("{}", pi + 1),
+                self.look.serif(12.0),
+                self.look.ink.gamma_multiply(0.38),
             );
         }
 
@@ -2527,7 +2686,19 @@ impl CahierApp {
                         pos2(paper.min.x + 64.0 * z, paper.min.y + 24.0 * z),
                         pos2(paper.min.x + 64.0 * z, paper.max.y - 24.0 * z),
                     ],
-                    Stroke::new(1.2, self.look.accent.gamma_multiply(0.45)),
+                    Stroke::new(1.15, {
+                        let red = self
+                            .look
+                            .inks
+                            .get(2)
+                            .copied()
+                            .unwrap_or(self.look.ink);
+                        Color32::from_rgb(
+                            (self.look.paper.r() as f32 * 0.62 + red.r() as f32 * 0.38) as u8,
+                            (self.look.paper.g() as f32 * 0.62 + red.g() as f32 * 0.38) as u8,
+                            (self.look.paper.b() as f32 * 0.62 + red.b() as f32 * 0.38) as u8,
+                        )
+                    }),
                 );
             }
             PaperKind::Grid => {
@@ -2648,10 +2819,29 @@ impl CahierApp {
         if !resp.hovered() {
             return;
         }
+        let space = ui.input(|i| i.key_down(Key::Space) || i.pointer.middle_down());
+        if space {
+            ui.ctx().set_cursor_icon(if ui.input(|i| i.pointer.any_down()) {
+                CursorIcon::Grabbing
+            } else {
+                CursorIcon::Grab
+            });
+            return;
+        }
+        let pen = self.tablet.snapshot();
+        if self.is_tablette() && pen.in_proximity {
+            ui.ctx().set_cursor_icon(CursorIcon::None);
+            return;
+        }
+        if self.is_tablette() && self.finger_alive(ui) {
+            ui.ctx().set_cursor_icon(CursorIcon::Grab);
+            return;
+        }
         let icon = match self.tool {
             Tool::Text => CursorIcon::Text,
             Tool::Lasso => CursorIcon::Crosshair,
             Tool::Image => CursorIcon::Copy,
+            Tool::EraserStroke | Tool::EraserArea => CursorIcon::NotAllowed,
             _ => CursorIcon::Crosshair,
         };
         ui.ctx().set_cursor_icon(icon);
@@ -2930,9 +3120,18 @@ fn paint_redo(p: &egui::Painter, c: Pos2, fg: Color32) {
     paint_curved_arrow(p, c, fg, -1.0);
 }
 
-fn paint_hand(p: &egui::Painter, c: Pos2, mode: HandMode, fg: Color32) {
+fn paint_mode(p: &egui::Painter, c: Pos2, mode: NoteMode, fg: Color32) {
     match mode {
-        HandMode::Stylus => {
+        NoteMode::Pupitre => {
+            let body = Rect::from_center_size(pos2(c.x, c.y + 1.4), vec2(9.2, 13.4));
+            p.rect_stroke(body, 4.5, Stroke::new(1.7_f32, fg), StrokeKind::Inside);
+            p.line_segment(
+                [pos2(c.x, c.y - 4.6), pos2(c.x, c.y + 0.6)],
+                Stroke::new(1.6_f32, fg),
+            );
+            p.circle_filled(pos2(c.x, c.y - 4.6), 1.15, fg);
+        }
+        NoteMode::Tablette => {
             let tip = pos2(c.x + 1.4, c.y - 9.2);
             let tail = pos2(c.x - 1.4, c.y + 8.6);
             shaft(p, tail, tip, 2.7, fg);
@@ -2948,23 +3147,6 @@ fn paint_hand(p: &egui::Painter, c: Pos2, mode: HandMode, fg: Color32) {
                 fg,
                 Stroke::NONE,
             ));
-        }
-        HandMode::Main => {
-            p.circle_filled(pos2(c.x - 5.4, c.y + 2.6), 3.15, fg);
-            p.circle_filled(pos2(c.x, c.y - 4.8), 3.35, fg);
-            p.circle_filled(pos2(c.x + 5.4, c.y + 2.6), 3.15, fg);
-        }
-        HandMode::Chiffon => {
-            p.circle_stroke(c, 7.8, Stroke::new(1.7_f32, fg));
-            p.line_segment(
-                [pos2(c.x - 5.2, c.y + 1.2), pos2(c.x, c.y - 2.4)],
-                Stroke::new(1.7_f32, fg),
-            );
-            p.line_segment(
-                [pos2(c.x, c.y - 2.4), pos2(c.x + 5.4, c.y + 1.6)],
-                Stroke::new(1.7_f32, fg),
-            );
-            p.circle_filled(pos2(c.x + 5.4, c.y + 1.6), 1.4, fg);
         }
     }
 }
