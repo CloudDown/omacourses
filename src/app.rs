@@ -1019,38 +1019,20 @@ impl CahierApp {
             }
         }
 
+        let in_bin = self.shelf_trash;
+        let room = if in_bin {
+            mix_col(self.look.desk, self.look.rust(), 0.14)
+        } else {
+            self.look.desk
+        };
         CentralPanel::default()
-            .frame(Frame::NONE.fill(self.look.desk))
+            .frame(Frame::NONE.fill(room))
             .show(ctx, |ui| {
-                ui.add_space(22.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(78.0);
-                    let Scene::Shelf { query } = &mut self.scene else {
-                        return;
-                    };
-                    let search_w = (ui.available_width() - 28.0).clamp(200.0, 720.0);
-                    Frame::NONE
-                        .fill(self.look.desk_deep)
-                        .corner_radius(22)
-                        .inner_margin(Margin::symmetric(18, 11))
-                        .show(ui, |ui| {
-                            ui.set_width(search_w);
-                            let hint = if self.shelf_trash {
-                                "Search trash"
-                            } else {
-                                "Search"
-                            };
-                            let te = TextEdit::singleline(query)
-                                .hint_text(hint)
-                                .font(self.look.mono(15.0))
-                                .frame(false);
-                            ui.add(te);
-                        });
-                });
+                ui.add_space(64.0);
                 if self.shelf_trash {
-                    ui.add_space(10.0);
+                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.add_space(78.0);
+                        ui.add_space(28.0);
                         ui.label(
                             RichText::new("Corbeille")
                                 .font(self.look.serif(18.0))
@@ -1063,7 +1045,7 @@ impl CahierApp {
                                     Label::new(
                                         RichText::new("vider")
                                             .font(self.look.mono(12.0))
-                                            .color(self.look.inks.get(2).copied().unwrap_or(self.look.accent)),
+                                            .color(self.look.rust()),
                                     )
                                     .sense(Sense::click()),
                                 )
@@ -1106,9 +1088,9 @@ impl CahierApp {
                     self.shelf_slots.clear();
                     ui.add_space(48.0);
                     ui.horizontal(|ui| {
-                        ui.add_space(78.0);
+                        ui.add_space(28.0);
                         let empty = if self.shelf_trash {
-                            "Corbeille vide"
+                            "Vide"
                         } else {
                             "No notes yet"
                         };
@@ -1134,14 +1116,14 @@ impl CahierApp {
 
                     ScrollArea::vertical().show(ui, |ui| {
                         ui.add_space(4.0);
-                        let available = ui.available_width() - 98.0;
+                        let available = ui.available_width() - 48.0;
                         let card_w = DOS_W + DOS_PAD * 2.0;
                         let gap = 6.0;
                         let cols = ((available + gap) / (card_w + gap)).floor().max(1.0) as usize;
                         let mut i = 0;
                         while i < notes.len() {
                             ui.horizontal(|ui| {
-                                ui.add_space(78.0);
+                                ui.add_space(28.0);
                                 for _ in 0..cols {
                                     if i >= notes.len() {
                                         break;
@@ -1277,9 +1259,9 @@ impl CahierApp {
                 let resp = self
                     .wastebasket(ui, self.shelf_trash, n, hungry)
                     .on_hover_text(if self.shelf_trash {
-                        "Étagère"
+                        "Shelf"
                     } else {
-                        "Panier"
+                        "Trash"
                     });
                 if resp.clicked() && !self.shelf_fed && !self.shelf_haul_armed {
                     self.shelf_trash = !self.shelf_trash;
@@ -1291,14 +1273,50 @@ impl CahierApp {
                 }
             });
 
-        Area::new(Id::new("fab-nouveau"))
-            .anchor(Align2::RIGHT_BOTTOM, vec2(-28.0, -28.0))
+        Area::new(Id::new("shelf-search"))
+            .anchor(Align2::CENTER_TOP, vec2(0.0, 16.0))
+            .order(Order::Foreground)
             .show(ctx, |ui| {
-                if !self.shelf_trash
-                    && self.inkwell(ui).on_hover_text("New  ·  N").clicked()
-                {
-                    self.new_note();
+                if let Scene::Shelf { query } = &mut self.scene {
+                    let rail = 168.0;
+                    let search_w = (ctx.screen_rect().width() - rail * 2.0)
+                        .clamp(200.0, 560.0);
+                    Frame::NONE
+                        .fill(self.look.desk_deep)
+                        .corner_radius(22)
+                        .inner_margin(Margin::symmetric(18, 11))
+                        .show(ui, |ui| {
+                            ui.set_width(search_w);
+                            let te = TextEdit::singleline(query)
+                                .hint_text("Search")
+                                .font(self.look.mono(15.0))
+                                .frame(false);
+                            ui.add(te);
+                        });
                 }
+            });
+
+        let fiche_ouverte = !self.lib.index.fiche_pliee;
+        Area::new(Id::new("shelf-top-right"))
+            .anchor(Align2::RIGHT_TOP, vec2(-16.0, 10.0))
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(10.0, 0.0);
+                    if self
+                        .help_signet(ui, fiche_ouverte)
+                        .on_hover_text(if fiche_ouverte { "Tuck away" } else { "Help" })
+                        .clicked()
+                    {
+                        self.lib.index.fiche_pliee = !self.lib.index.fiche_pliee;
+                        self.lib.save_index();
+                    }
+                    if !self.shelf_trash
+                        && self.inkwell(ui).on_hover_text("New  ·  N").clicked()
+                    {
+                        self.new_note();
+                    }
+                });
             });
 
         // Barre d'actions si sélection
@@ -1316,7 +1334,7 @@ impl CahierApp {
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new(format!("{n} sélectionné{}", if n > 1 { "s" } else { "" }))
+                                    RichText::new(format!("{n} selected"))
                                         .font(self.look.mono(12.0))
                                         .color(self.look.fg),
                                 );
@@ -1325,7 +1343,7 @@ impl CahierApp {
                                     if ui
                                         .add(
                                             Label::new(
-                                                RichText::new("restaurer")
+                                                RichText::new("restore")
                                                     .font(self.look.mono(12.0))
                                                     .color(self.look.accent),
                                             )
@@ -1342,7 +1360,7 @@ impl CahierApp {
                                     if ui
                                         .add(
                                             Label::new(
-                                                RichText::new("supprimer")
+                                                RichText::new("delete")
                                                     .font(self.look.mono(12.0))
                                                     .color(
                                                         self.look
@@ -1364,15 +1382,9 @@ impl CahierApp {
                                 } else if ui
                                     .add(
                                         Label::new(
-                                            RichText::new("corbeille")
+                                            RichText::new("trash")
                                                 .font(self.look.mono(12.0))
-                                                .color(
-                                                    self.look
-                                                        .inks
-                                                        .get(2)
-                                                        .copied()
-                                                        .unwrap_or(self.look.accent),
-                                                ),
+                                                .color(self.look.rust()),
                                         )
                                         .sense(Sense::click()),
                                     )
@@ -1388,28 +1400,14 @@ impl CahierApp {
                 });
         }
 
-        let fiche_ouverte = !self.lib.index.fiche_pliee;
         if fiche_ouverte && !self.shelf_trash {
             Area::new(Id::new("shelf-tuto-fiche"))
-                .anchor(Align2::LEFT_TOP, vec2(16.0, 46.0))
+                .anchor(Align2::RIGHT_TOP, vec2(-16.0, 88.0))
                 .order(Order::Foreground)
                 .show(ctx, |ui| {
                     self.fiche_pupitre(ui);
                 });
         }
-        Area::new(Id::new("shelf-tuto-btn"))
-            .anchor(Align2::LEFT_TOP, vec2(14.0, 14.0))
-            .order(Order::Foreground)
-            .show(ctx, |ui| {
-                if self
-                    .help_signet(ui, fiche_ouverte)
-                    .on_hover_text(if fiche_ouverte { "Replier" } else { "Aide" })
-                    .clicked()
-                {
-                    self.lib.index.fiche_pliee = !self.lib.index.fiche_pliee;
-                    self.lib.save_index();
-                }
-            });
         self.paint_shelf_haul(ctx);
         if let Some(id) = self.emoji_pick {
             self.ui_emoji_picker(ctx, id);
@@ -1658,133 +1656,48 @@ impl CahierApp {
     }
 
     fn wastebasket(&mut self, ui: &mut Ui, open: bool, count: usize, hungry: bool) -> Response {
-        let w = 92.0;
-        let h = 86.0;
-        let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+        let hit = 52.0;
+        let (rect, resp) = ui.allocate_exact_size(vec2(hit, hit), Sense::click());
         self.trash_rect = rect;
-        let p = ui.painter();
         let id = Id::new("waste-basket");
         let hover_t = ui.ctx().animate_bool_with_time(
             id.with("h"),
             resp.hovered() || hungry || open,
-            0.18,
+            0.16,
         );
         let e = hover_t * hover_t * (3.0 - 2.0 * hover_t);
-        let lift = e * 3.0;
-        let mouth = pos2(rect.center().x, rect.min.y + 22.0 - lift);
-        self.trash_mouth = mouth;
-
-        let wicker = mix_col(self.look.desk_edge, self.look.ink, 0.18);
-        let rib = mix_col(wicker, self.look.paper, 0.12);
-        let hole = self.look.desk_deep;
-        let rim = mix_col(self.look.paper, self.look.accent, 0.16 + 0.22 * e);
-
-        // Ombre au sol
-        p.add(Shape::ellipse_filled(
-            pos2(rect.center().x + 2.0, rect.max.y - 6.0 + e),
-            vec2(30.0 + e * 2.0, 7.0),
-            self.look.shadow.gamma_multiply(0.45 + 0.15 * e),
-        ));
-
-        let top_w = 34.0 + e * 4.0;
-        let bot_w = 24.0;
-        let body_top = mouth.y + 6.0;
-        let body_bot = rect.max.y - 10.0;
-        let body = [
-            pos2(mouth.x - top_w, body_top),
-            pos2(mouth.x + top_w, body_top),
-            pos2(mouth.x + bot_w, body_bot),
-            pos2(mouth.x - bot_w, body_bot),
-        ];
-        p.add(Shape::convex_polygon(
-            body.to_vec(),
-            wicker,
-            Stroke::NONE,
-        ));
-        // Côté ombré
-        p.add(Shape::convex_polygon(
-            vec![
-                pos2(mouth.x + top_w * 0.15, body_top),
-                pos2(mouth.x + top_w, body_top),
-                pos2(mouth.x + bot_w, body_bot),
-                pos2(mouth.x + bot_w * 0.2, body_bot),
-            ],
-            shade_rgb(wicker, 0.72),
-            Stroke::NONE,
-        ));
-
-        let wire = Stroke::new(1.25_f32, rib.gamma_multiply(0.85));
-        for t in [0.28_f32, 0.55, 0.82] {
-            let y = body_top + (body_bot - body_top) * t;
-            let hw = top_w + (bot_w - top_w) * t;
-            p.line_segment(
-                [pos2(mouth.x - hw + 1.0, y), pos2(mouth.x + hw - 1.0, y)],
-                wire,
-            );
-        }
-        for k in [-0.55_f32, 0.0, 0.55] {
-            p.line_segment(
-                [
-                    pos2(mouth.x + top_w * k, body_top + 1.0),
-                    pos2(mouth.x + bot_w * k, body_bot - 1.0),
-                ],
-                Stroke::new(1.05_f32, rib.gamma_multiply(0.55)),
-            );
-        }
-
-        // Bouche : ellipse, on voit le fond du panier
-        let rx = 32.0 + e * 5.0;
-        let ry = 11.0 + e * 2.0;
-        p.add(Shape::ellipse_filled(mouth + vec2(0.0, 2.0), vec2(rx, ry), hole));
-        p.add(Shape::ellipse_stroke(
-            mouth,
-            vec2(rx, ry),
-            Stroke::new(2.4_f32, rim),
-        ));
-        p.add(Shape::ellipse_stroke(
-            mouth + vec2(0.0, 1.4),
-            vec2(rx - 3.0, ry - 2.0),
-            Stroke::new(1.0_f32, hole.gamma_multiply(0.7)),
-        ));
-
-        // Feuille froissée qui dépasse
-        if count > 0 || hungry {
-            let paper = mix_col(self.look.paper, self.look.accent, 0.04);
-            let peek = mouth + vec2(-6.0 + e * 3.0, -4.0 - e * 5.0);
-            p.add(Shape::convex_polygon(
-                vec![
-                    peek + vec2(-8.0, 4.0),
-                    peek + vec2(11.0, 1.0),
-                    peek + vec2(9.0, 10.0),
-                    peek + vec2(-5.0, 11.0),
-                ],
-                paper,
-                Stroke::NONE,
-            ));
-            p.line_segment(
-                [peek + vec2(-4.0, 6.0), peek + vec2(6.0, 5.0)],
-                Stroke::new(0.8_f32, self.look.paper_rule),
-            );
-        }
-        if count > 1 {
-            let paper = self.look.paper.gamma_multiply(0.92);
-            p.add(Shape::convex_polygon(
-                vec![
-                    mouth + vec2(8.0, -1.0),
-                    mouth + vec2(16.0, 2.0),
-                    mouth + vec2(12.0, 8.0),
-                    mouth + vec2(5.0, 6.0),
-                ],
-                paper,
-                Stroke::NONE,
-            ));
-        }
-
+        let rust = self.look.rust();
+        let col = if open || hungry || count > 0 {
+            shade_rgb(rust, 1.1 + 0.08 * e)
+        } else {
+            rust
+        };
+        let side = 34.0 + e * 3.0;
+        let icon = Rect::from_center_size(rect.center(), vec2(side, side));
+        self.trash_mouth = pos2(icon.center().x, icon.min.y + side * 0.28);
+        let tex = self.trash_icon(ui.ctx(), col);
+        ui.painter().image(
+            tex.id(),
+            icon,
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
         resp.on_hover_cursor(if hungry {
             CursorIcon::Move
         } else {
             CursorIcon::PointingHand
         })
+    }
+
+    fn trash_icon(&mut self, ctx: &Context, color: Color32) -> TextureHandle {
+        let key = format!("icon-trash-{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
+        if let Some(tex) = self.textures.get(&key) {
+            return tex.clone();
+        }
+        let img = raster_lucide_trash(color, 128);
+        let tex = ctx.load_texture(&key, img, TextureOptions::LINEAR);
+        self.textures.insert(key, tex.clone());
+        tex
     }
 
     fn paint_dos_at(
@@ -1895,7 +1808,7 @@ impl CahierApp {
     }
 
     /// Signet de la fiche : papier, cran en V, astérisque de marge.
-    /// Il pend dans la gouttière gauche, à hauteur de la recherche.
+    /// Signet papier, à droite de la recherche.
     fn help_signet(&self, ui: &mut Ui, open: bool) -> Response {
         let w = 32.0;
         let h = 66.0;
@@ -2020,164 +1933,147 @@ impl CahierApp {
         resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
-    fn fiche_pupitre(&mut self, ui: &mut Ui) {
-        let w = 352.0_f32
-            .min(ui.ctx().screen_rect().width() - 48.0)
-            .max(280.0);
-        let h = 318.0;
-        let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
-        let p = ui.painter_at(rect);
+    /// Feuille du cahier : même objet pour l'aide et les marques.
+    fn paint_cahier_page(&self, p: &Painter, rect: Rect) -> Rect {
+        let paper = mix_col(self.look.paper, self.look.accent, 0.028);
         let ink = self.look.ink;
-        let mute = ink.gamma_multiply(0.52);
-        let paper = self.look.paper;
-        let rule = self.look.paper_rule;
-        let accent = self.look.accent;
-
-        // Layered card shadow (desk blotter)
         p.rect_filled(
-            rect.translate(vec2(5.0, 8.0)),
-            CornerRadius::same(6),
-            self.look.shadow.gamma_multiply(0.55),
+            rect.translate(vec2(4.0, 7.0)),
+            CornerRadius::same(3),
+            self.look.shadow.gamma_multiply(0.42),
         );
         p.rect_filled(
-            rect.translate(vec2(2.0, 3.0)),
-            CornerRadius::same(5),
-            self.look.shadow.gamma_multiply(0.28),
+            rect.translate(vec2(1.5, 2.5)),
+            CornerRadius::same(3),
+            self.look.shadow.gamma_multiply(0.18),
         );
-
-        // Card body — slight warm offset from paper
-        let card = mix_col(paper, accent, 0.04);
-        p.rect_filled(rect, CornerRadius::same(4), card);
-        // Dog-ear fold top-right
-        let ear = [
-            pos2(rect.max.x - 22.0, rect.min.y),
-            pos2(rect.max.x, rect.min.y),
-            pos2(rect.max.x, rect.min.y + 22.0),
-        ];
-        p.add(Shape::convex_polygon(
-            ear.to_vec(),
-            mix_col(card, ink, 0.08),
-            Stroke::NONE,
-        ));
+        p.rect_filled(rect, CornerRadius::same(3), paper);
+        p.rect_stroke(
+            rect,
+            CornerRadius::same(3),
+            Stroke::new(1.0_f32, ink.gamma_multiply(0.12)),
+            StrokeKind::Inside,
+        );
+        let gutter = 30.0;
+        let hx = rect.min.x + 15.0;
+        for t in [0.20_f32, 0.50, 0.80] {
+            let c = pos2(hx, rect.min.y + rect.height() * t);
+            p.circle_filled(c, 3.1, self.look.desk);
+            p.circle_stroke(c, 3.1, Stroke::new(0.85_f32, ink.gamma_multiply(0.20)));
+        }
         p.line_segment(
             [
-                pos2(rect.max.x - 22.0, rect.min.y),
-                pos2(rect.max.x, rect.min.y + 22.0),
+                pos2(rect.min.x + gutter, rect.min.y + 18.0),
+                pos2(rect.min.x + gutter, rect.max.y - 18.0),
             ],
-            Stroke::new(1.0_f32, ink.gamma_multiply(0.14)),
+            Stroke::new(1.05_f32, self.look.paper_rule_strong),
         );
+        Rect::from_min_max(
+            pos2(rect.min.x + gutter + 18.0, rect.min.y + 20.0),
+            pos2(rect.max.x - 22.0, rect.max.y - 18.0),
+        )
+    }
 
-        // Left ledger stripe
-        p.rect_filled(
-            Rect::from_min_max(
-                pos2(rect.min.x + 18.0, rect.min.y + 14.0),
-                pos2(rect.min.x + 20.2, rect.max.y - 18.0),
-            ),
-            CornerRadius::same(1),
-            accent.gamma_multiply(0.75),
-        );
-
-        // Header
+    fn page_head(&self, p: &Painter, inner: Rect, title: &str, kicker: &str) -> f32 {
+        let ink = self.look.ink;
         p.text(
-            pos2(rect.min.x + 34.0, rect.min.y + 18.0),
+            inner.min,
             Align2::LEFT_TOP,
-            "Field notes",
-            self.look.serif(23.0),
+            title,
+            self.look.serif(26.0),
             ink,
         );
         p.text(
-            pos2(rect.min.x + 34.0, rect.min.y + 44.0),
+            pos2(inner.min.x, inner.min.y + 32.0),
             Align2::LEFT_TOP,
-            "Ink & gestures",
+            kicker,
             self.look.mono(11.0),
-            mute,
+            ink.gamma_multiply(0.42),
         );
-        // Accent underline under title
+        let y = inner.min.y + 52.0;
         p.line_segment(
-            [
-                pos2(rect.min.x + 34.0, rect.min.y + 66.0),
-                pos2(rect.min.x + 118.0, rect.min.y + 66.0),
-            ],
-            Stroke::new(1.6_f32, accent.gamma_multiply(0.85)),
+            [pos2(inner.min.x, y), pos2(inner.min.x + 52.0, y)],
+            Stroke::new(1.7_f32, self.look.accent.gamma_multiply(0.88)),
         );
         p.line_segment(
-            [
-                pos2(rect.min.x + 34.0, rect.min.y + 70.0),
-                pos2(rect.max.x - 28.0, rect.min.y + 70.0),
-            ],
-            Stroke::new(0.8_f32, rule),
+            [pos2(inner.min.x + 56.0, y), pos2(inner.max.x, y)],
+            Stroke::new(0.8_f32, self.look.paper_rule),
         );
+        y + 16.0
+    }
 
-        let rows = [
-            ("Draw", "Stylus or mouse"),
-            ("Pan", "Space · drag"),
-            ("Erase", "E · hold right"),
-            ("Tools", "P  B  C  H"),
-            ("Undo", "Ctrl+Z · two-finger"),
-            ("Lasso", "L · stylus btn 2"),
-            ("Mode", "K · desk / tablet"),
-        ];
-        let y0 = rect.min.y + 86.0;
-        let row_h = 28.0;
-        for (i, (k, v)) in rows.iter().enumerate() {
-            let y = y0 + i as f32 * row_h;
-            // Ruled line
-            p.line_segment(
-                [
-                    pos2(rect.min.x + 34.0, y + row_h - 4.0),
-                    pos2(rect.max.x - 24.0, y + row_h - 4.0),
+    fn fiche_pupitre(&mut self, ui: &mut Ui) {
+        let w = 400.0_f32
+            .min(ui.ctx().screen_rect().width() - 40.0)
+            .max(300.0);
+        let h = 428.0;
+        let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+        let p = ui.painter_at(rect);
+        let inner = self.paint_cahier_page(&p, rect);
+        let mut y = self.page_head(&p, inner, "Cahier", "les gestes");
+        let ink = self.look.ink;
+        let mute = ink.gamma_multiply(0.46);
+        let rule = self.look.paper_rule;
+
+        let sections: [(&str, &[(&str, &str)]); 2] = [
+            (
+                "étagère",
+                &[
+                    ("Nouveau", "N"),
+                    ("Ouvrir", "double-clic"),
+                    ("Choisir", "clic · bande"),
+                    ("Corbeille", "glisser"),
+                    ("Icône", "menu"),
                 ],
-                Stroke::new(0.7_f32, rule.gamma_multiply(0.85)),
-            );
-            // Action label on the left
+            ),
+            (
+                "pupitre",
+                &[
+                    ("Dessiner", "stylet"),
+                    ("Déplacer", "espace"),
+                    ("Effacer", "E"),
+                    ("Annuler", "Ctrl+Z"),
+                ],
+            ),
+        ];
+        for (label, rows) in sections {
             p.text(
-                pos2(rect.min.x + 36.0, y + 4.0),
+                pos2(inner.min.x, y),
                 Align2::LEFT_TOP,
-                *k,
-                self.look.serif(15.0),
-                ink,
-            );
-            // Keycaps on the right as soft pills
-            let key_w = 148.0_f32.min((rect.width() - 120.0).max(100.0));
-            let key_rect =
-                Rect::from_min_size(pos2(rect.max.x - 24.0 - key_w, y + 2.0), vec2(key_w, 20.0));
-            p.rect_filled(key_rect, CornerRadius::same(4), mix_col(card, ink, 0.05));
-            p.rect_stroke(
-                key_rect,
-                CornerRadius::same(4),
-                Stroke::new(0.8_f32, ink.gamma_multiply(0.10)),
-                StrokeKind::Inside,
-            );
-            p.text(
-                key_rect.center(),
-                Align2::CENTER_CENTER,
-                *v,
-                self.look.mono(11.0),
+                label,
+                self.look.mono(10.0),
                 mute,
             );
+            y += 20.0;
+            for (k, v) in rows {
+                p.line_segment(
+                    [pos2(inner.min.x, y + 22.0), pos2(inner.max.x, y + 22.0)],
+                    Stroke::new(0.7_f32, rule),
+                );
+                p.text(
+                    pos2(inner.min.x, y + 3.0),
+                    Align2::LEFT_TOP,
+                    *k,
+                    self.look.serif(16.0),
+                    ink,
+                );
+                p.text(
+                    pos2(inner.max.x, y + 5.0),
+                    Align2::RIGHT_TOP,
+                    *v,
+                    self.look.mono(12.0),
+                    mute,
+                );
+                y += 26.0;
+            }
+            y += 10.0;
         }
-
-        // Footer whisper
         p.text(
-            pos2(rect.center().x, rect.max.y - 14.0),
+            pos2(inner.center().x, inner.max.y - 2.0),
             Align2::CENTER_BOTTOM,
-            "tap to tuck away",
+            "clic pour replier",
             self.look.mono(10.0),
-            mute.gamma_multiply(0.85),
-        );
-
-        p.rect_stroke(
-            rect,
-            CornerRadius::same(4),
-            Stroke::new(
-                1.0_f32,
-                if resp.hovered() {
-                    accent.gamma_multiply(0.55)
-                } else {
-                    ink.gamma_multiply(0.12)
-                },
-            ),
-            StrokeKind::Inside,
+            mute,
         );
 
         if resp.clicked() {
@@ -2185,7 +2081,7 @@ impl CahierApp {
             self.lib.save_index();
         }
         resp.on_hover_cursor(CursorIcon::PointingHand)
-            .on_hover_text("Close");
+            .on_hover_text("Replier");
     }
 
     /// Peint une icône couleur dans `bounds`. Faux si la bitmap n'est pas là.
@@ -2309,13 +2205,13 @@ impl CahierApp {
                 ui.scope_builder(UiBuilder::new().max_rect(inner), |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("Vignettes")
+                            RichText::new("Icons")
                                 .font(self.look.serif(24.0))
                                 .color(ink),
                         );
                         ui.add_space(8.0);
                         ui.label(
-                            RichText::new("à détacher")
+                            RichText::new("for the spine")
                                 .font(self.look.mono(11.0))
                                 .color(mute),
                         );
@@ -2323,7 +2219,7 @@ impl CahierApp {
                             if ui
                                 .add(
                                     Label::new(
-                                        RichText::new("replier")
+                                        RichText::new("close")
                                             .font(self.look.mono(11.0))
                                             .color(mute),
                                     )
@@ -2345,7 +2241,7 @@ impl CahierApp {
 
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("souvent")
+                            RichText::new("favorites")
                                 .font(self.look.mono(10.0))
                                 .color(mute),
                         );
@@ -2373,7 +2269,7 @@ impl CahierApp {
                         Stroke::new(0.8_f32, self.look.paper_rule),
                     );
                     let te = TextEdit::singleline(&mut self.emoji_query)
-                        .hint_text("coller une vignette")
+                        .hint_text("paste an icon")
                         .font(self.look.serif(15.0))
                         .text_color(ink)
                         .frame(false);
@@ -2528,9 +2424,15 @@ impl CahierApp {
         }
         let lift_t = ui
             .ctx()
-            .animate_bool_with_time(id.with("peek"), over || selected, 0.16);
-        let e = lift_t * lift_t * (3.0 - 2.0 * lift_t);
-        let cloth = self.look.cloth_at(meta.cover);
+            .animate_bool_with_time(id.with("peek"), over, 0.16);
+        let lift = lift_t * lift_t * (3.0 - 2.0 * lift_t);
+        let discarded = self.shelf_trash;
+        let e = if discarded { lift * 0.2 } else { lift };
+        let cloth = if discarded {
+            mix_col(self.look.cloth_at(meta.cover), self.look.desk, 0.28)
+        } else {
+            self.look.cloth_at(meta.cover)
+        };
         let cloth_deep = shade_rgb(cloth, 0.70);
         let cloth_edge = shade_rgb(cloth, 0.48);
         let paper = self.look.paper;
@@ -2556,6 +2458,29 @@ impl CahierApp {
                 self.look.shadow.gamma_multiply(0.18),
             );
             return None;
+        }
+
+        if selected {
+            let (r, g, b) = if self.look.dark {
+                (255_u8, 255, 255)
+            } else {
+                (self.look.ink.r(), self.look.ink.g(), self.look.ink.b())
+            };
+            let halo = face.expand(5.0);
+            painter.rect_filled(
+                halo,
+                CornerRadius::same(11),
+                Color32::from_rgba_unmultiplied(r, g, b, if self.look.dark { 18 } else { 16 }),
+            );
+            painter.rect_stroke(
+                halo,
+                CornerRadius::same(11),
+                Stroke::new(
+                    1.0_f32,
+                    Color32::from_rgba_unmultiplied(r, g, b, if self.look.dark { 52 } else { 36 }),
+                ),
+                StrokeKind::Inside,
+            );
         }
 
         painter.rect_filled(
@@ -2617,29 +2542,6 @@ impl CahierApp {
             Stroke::new(1.0_f32, cloth_edge),
             StrokeKind::Inside,
         );
-        if selected {
-            let sel = self.look.accent;
-            let pad = 4.0;
-            let r = face.expand(pad);
-            painter.rect_stroke(
-                r,
-                CornerRadius::same(10),
-                Stroke::new(1.6_f32, sel),
-                StrokeKind::Outside,
-            );
-            // Coins de sélection, comme un cadre photo
-            let arm = 10.0;
-            let s = Stroke::new(2.0_f32, sel);
-            for (o, dx, dy) in [
-                (r.left_top(), 1.0, 1.0),
-                (r.right_top(), -1.0, 1.0),
-                (r.left_bottom(), 1.0, -1.0),
-                (r.right_bottom(), -1.0, -1.0),
-            ] {
-                painter.line_segment([o, o + vec2(arm * dx, 0.0)], s);
-                painter.line_segment([o, o + vec2(0.0, arm * dy)], s);
-            }
-        }
         for i in 0..3 {
             let o = i as f32 * 1.5;
             painter.rect_filled(
@@ -2755,6 +2657,22 @@ impl CahierApp {
                     t.to_string()
                 }
             };
+            if selected {
+                let (r, g, b) = if self.look.dark {
+                    (255_u8, 255, 255)
+                } else {
+                    (self.look.ink.r(), self.look.ink.g(), self.look.ink.b())
+                };
+                let name = Rect::from_center_size(
+                    title_rect.center(),
+                    vec2((title_rect.width() - 8.0).max(48.0), 22.0),
+                );
+                painter.rect_filled(
+                    name,
+                    CornerRadius::same(7),
+                    Color32::from_rgba_unmultiplied(r, g, b, if self.look.dark { 20 } else { 16 }),
+                );
+            }
             painter.text(
                 title_rect.center(),
                 Align2::CENTER_CENTER,
@@ -2773,16 +2691,6 @@ impl CahierApp {
         }
 
         let mut act = None;
-        if !self.shelf_trash {
-            let logo_resp = ui.interact(logo_r, id.with("logo"), Sense::click());
-            if logo_resp.clicked() {
-                act = Some(DosAct::Emoji);
-            }
-            logo_resp
-                .on_hover_cursor(CursorIcon::PointingHand)
-                .on_hover_text("Icon");
-        }
-
         let mut menu_act = None;
         resp.context_menu(|ui| {
             ui.set_min_width(140.0);
@@ -2812,20 +2720,20 @@ impl CahierApp {
                     ui.close();
                 }
                 if ui
-                    .button(RichText::new("Corbeille").color(Color32::from_rgb(0xe2, 0x4b, 0x4a)))
+                    .button(RichText::new("Trash").color(Color32::from_rgb(0xe2, 0x4b, 0x4a)))
                     .clicked()
                 {
                     menu_act = Some(DosAct::Del);
                     ui.close();
                 }
             } else {
-                if ui.button("Restaurer").clicked() {
+                if ui.button("Restore").clicked() {
                     menu_act = Some(DosAct::Restore);
                     ui.close();
                 }
                 if ui
                     .button(
-                        RichText::new("Supprimer").color(Color32::from_rgb(0xe2, 0x4b, 0x4a)),
+                        RichText::new("Delete").color(Color32::from_rgb(0xe2, 0x4b, 0x4a)),
                     )
                     .clicked()
                 {
@@ -2843,13 +2751,11 @@ impl CahierApp {
         }
         if act.is_none() && !renaming {
             let on_title = pointer.is_some_and(|p| title_rect.contains(p));
-            let on_logo = pointer.is_some_and(|p| logo_r.contains(p));
             let mods = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
-            if resp.double_clicked() && !on_title && !on_logo && !self.shelf_trash {
+            if resp.double_clicked() && !on_title && !self.shelf_trash {
                 act = Some(DosAct::Open);
             } else if resp.clicked()
                 && !on_title
-                && !on_logo
                 && !self.shelf_band_armed
                 && !self.shelf_haul_armed
             {
@@ -3239,16 +3145,16 @@ impl CahierApp {
             let tip = match kind {
                 Tool::EraserStroke => {
                     if self.is_tablette() {
-                        "sélection · efface le trait entier"
+                        "stroke · erases the whole stroke"
                     } else {
-                        "sélection · efface le trait entier  ·  e"
+                        "stroke · erases the whole stroke  ·  e"
                     }
                 }
                 Tool::EraserArea => {
                     if self.is_tablette() {
-                        "zone · efface sous le doigt / stylet"
+                        "area · erases under finger or stylus"
                     } else {
-                        "zone · efface sous le curseur  ·  shift+e"
+                        "area · erases under the cursor  ·  shift+e"
                     }
                 }
                 _ => kind.label(),
@@ -4591,6 +4497,54 @@ fn shade_rgb(c: Color32, k: f32) -> Color32 {
         (c.b() as f32 * k).min(255.0) as u8,
         c.a(),
     )
+}
+
+/// Lucide trash-2 (ISC) — `assets/trash.svg`, teinté.
+fn raster_lucide_trash(color: Color32, px: u32) -> ColorImage {
+    use tiny_skia::{LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke as SkStroke, Transform};
+    let mut pm = Pixmap::new(px, px).expect("trash pixmap");
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(color.r(), color.g(), color.b(), 255);
+    paint.anti_alias = true;
+    let stroke = SkStroke {
+        width: 2.0,
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..SkStroke::default()
+    };
+    let t = Transform::from_scale(px as f32 / 24.0, px as f32 / 24.0);
+    let stroke_line = |pm: &mut Pixmap, x0: f32, y0: f32, x1: f32, y1: f32| {
+        let mut pb = PathBuilder::new();
+        pb.move_to(x0, y0);
+        pb.line_to(x1, y1);
+        if let Some(path) = pb.finish() {
+            pm.stroke_path(&path, &paint, &stroke, t, None);
+        }
+    };
+    stroke_line(&mut pm, 3.0, 6.0, 21.0, 6.0);
+    let mut body = PathBuilder::new();
+    body.move_to(19.0, 6.0);
+    body.line_to(19.0, 20.0);
+    body.cubic_to(19.0, 21.0, 18.0, 22.0, 17.0, 22.0);
+    body.line_to(7.0, 22.0);
+    body.cubic_to(6.0, 22.0, 5.0, 21.0, 5.0, 20.0);
+    body.line_to(5.0, 6.0);
+    if let Some(path) = body.finish() {
+        pm.stroke_path(&path, &paint, &stroke, t, None);
+    }
+    let mut lid = PathBuilder::new();
+    lid.move_to(8.0, 6.0);
+    lid.line_to(8.0, 4.0);
+    lid.cubic_to(8.0, 3.0, 9.0, 2.0, 10.0, 2.0);
+    lid.line_to(14.0, 2.0);
+    lid.cubic_to(15.0, 2.0, 16.0, 3.0, 16.0, 4.0);
+    lid.line_to(16.0, 6.0);
+    if let Some(path) = lid.finish() {
+        pm.stroke_path(&path, &paint, &stroke, t, None);
+    }
+    stroke_line(&mut pm, 10.0, 11.0, 10.0, 17.0);
+    stroke_line(&mut pm, 14.0, 11.0, 14.0, 17.0);
+    ColorImage::from_rgba_premultiplied([px as usize, px as usize], pm.data())
 }
 
 fn mix_col(a: Color32, b: Color32, t: f32) -> Color32 {

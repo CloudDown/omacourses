@@ -190,6 +190,11 @@ impl Look {
     pub fn cloth_at(&self, i: u8) -> Color32 {
         self.cloth[i as usize % self.cloth.len()]
     }
+
+    /// Rouge du thème (encre 3 / `red` Omarchy).
+    pub fn rust(&self) -> Color32 {
+        self.inks.get(2).copied().unwrap_or(self.accent)
+    }
 }
 
 pub fn current_dir() -> PathBuf {

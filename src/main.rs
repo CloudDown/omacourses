@@ -15,7 +15,7 @@ mod undo;
 use app::CahierApp;
 
 const HELP: &str = "\
-cahier — notes au stylet, pupitre Omarchy
+cahier — stylus notes, Omarchy lectern
 
 Usage:
   cahier
@@ -24,32 +24,32 @@ Usage:
   cahier --data-dir
   cahier --theme
 
-Ouvre le pupitre. Les cahiers vivent dans $CAHIER_DATA
-ou ~/.local/share/omacourses. Le chrome suit
-~/.local/state/omarchy/current/theme (même palette que le terminal).
+Opens the lectern. Notebooks live in $CAHIER_DATA
+or ~/.local/share/omacourses. Chrome follows
+~/.local/state/omarchy/current/theme (same palette as the terminal).
 
 Examples:
   cahier
   CAHIER_DATA=/tmp/cahier cahier
-  CAHIER_OPEN=Mentalité cahier
+  CAHIER_OPEN=Mindset cahier
   cahier --theme
   cahier --data-dir
 
-Gestes (dans un cahier):
-  k  pupitre (clavier+souris) ↔ tablette (stylet+main)
-  p feutre   b plume   c crayon   h surligneur
-  e gomme sélection   shift+e gomme zone
-  l lasso   t texte   i image
-  [ ] épaisseur   1-9 encre   m papier
-  + − zoom   0 / coins = taille écran
-  pupitre : souris écrit · espace panorama · clic droit = dernière gomme
-  tablette : stylet écrit · doigt pousse · tap 2 doigts = annuler
-  pavé tactile : pincer ou deux doigts (vertical) = zoom
-  pincement écran / ctrl+molette zoom
-  bouton stylet = dernière gomme (tenir)   clic en l'air = plume ↔ gomme
-  2ᵉ bouton = lasso (tenir)
-  glisser la poignée de la trousse → haut / bas / côtés
-  shift relâché après un trait ≈ forme (ligne, cercle, rectangle)
+Gestures (inside a notebook):
+  k  desktop (keyboard+mouse) ↔ tablet (stylus+hand)
+  p felt-tip   b fountain   c pencil   h highlighter
+  e stroke eraser   shift+e area eraser
+  l lasso   t text   i image
+  [ ] thickness   1-9 ink   m paper
+  + − zoom   0 / corners = fit to screen
+  desktop: mouse writes · space pans · right-click = last eraser
+  tablet: stylus writes · finger pans · two-finger tap = undo
+  trackpad: pinch or two fingers (vertical) = zoom
+  screen pinch / ctrl+scroll zoom
+  stylus button = last eraser (hold)   air-click = pen ↔ eraser
+  2nd button = lasso (hold)
+  drag the pencil-case handle → top / bottom / sides
+  shift released after a stroke ≈ shape (line, circle, rectangle)
   ctrl+z/y   ctrl+e png   ctrl+shift+e pdf
 ";
 
@@ -84,7 +84,7 @@ fn main() -> eframe::Result<()> {
             return Ok(());
         }
         Some(other) => {
-            eprintln!("Error: argument inconnu `{other}`.");
+            eprintln!("Error: unknown argument `{other}`.");
             eprintln!("  cahier --help");
             std::process::exit(2);
         }

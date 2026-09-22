@@ -13,7 +13,7 @@ pub fn seed_if_needed(lib: &mut Library) {
 
     let mentalite = note_mentalite();
     let da = note_direction();
-    let brouillon = Note::blank("Brouillon", 2);
+    let brouillon = Note::blank("Draft", 2);
     lib.insert_new(&mentalite);
     lib.insert_new(&da);
     lib.insert_new(&brouillon);
@@ -21,17 +21,17 @@ pub fn seed_if_needed(lib: &mut Library) {
 }
 
 fn note_mentalite() -> Note {
-    let mut n = Note::blank("Mentalité", 0);
+    let mut n = Note::blank("Mindset", 0);
     n.paper = PaperKind::Lined;
     n.pinned = true;
     let ink = Color32::from_rgb(0x1c, 0x18, 0x14);
     let accent = Color32::from_rgb(0x7f, 0xbb, 0xb3);
     let body = concat!(
-        "Omarchy n'est pas un ricing kit. C'est une machine finie : Arch + Hyprland, des choix déjà faits, du beau par défaut.\n\n",
-        "Opinionated — tu n'as pas à décider de 40 polices avant d'écrire.\n",
-        "Local — tes notes restent sur le disque (~/.local/share/omacourses). Pas de compte, pas de sync.\n",
-        "Clavier d'abord, main ensuite — le stylet quand la pensée a besoin d'un croquis, pas d'un formulaire.\n",
-        "Moins d'options, plus de métier."
+        "Omarchy is not a ricing kit. It is a finished machine: Arch + Hyprland, choices already made, beautiful by default.\n\n",
+        "Opinionated — you don't pick 40 fonts before you write.\n",
+        "Local — your notes stay on disk (~/.local/share/omacourses). No account, no sync.\n",
+        "Keyboard first, hand second — the stylus when a thought needs a sketch, not a form.\n",
+        "Fewer options, more craft."
     );
     n.pages[0].texts.push(text(72.0, 72.0, 18.0, body, ink));
     n.pages[0].strokes.push(underline(72.0, 58.0, 280.0, ink));
@@ -45,18 +45,18 @@ fn note_mentalite() -> Note {
 }
 
 fn note_direction() -> Note {
-    let mut n = Note::blank("Direction artistique", 3);
+    let mut n = Note::blank("Art direction", 3);
     n.paper = PaperKind::Millimetre;
     n.pinned = true;
     let ink = Color32::from_rgb(0x1c, 0x18, 0x14);
     let red = Color32::from_rgb(0xe6, 0x7e, 0x80);
     let body = concat!(
-        "Deux familles, pas une palette Material.\n\n",
-        "1. Le pupitre — chrome Hyprland, couleurs du thème actif (ici, le colors.toml Omarchy).\n",
-        "2. La feuille — objet physique. Crème, millimétré, trous de reliure. Le dark mode assombrit le bureau, pas le papier.\n\n",
-        "Mono pour l'OS, serif pour le titre du cahier.\n",
-        "Une scène par geste : étagère de dos toilés, trousse, règle de laiton, page arrachée à l'export.\n\n",
-        "Si deux écrans se ressemblent en plissant les yeux, l'un des deux n'a pas d'objet."
+        "Two families, not a Material palette.\n\n",
+        "1. The lectern — Hyprland chrome, colors of the active theme (here, Omarchy colors.toml).\n",
+        "2. The page — a physical object. Cream, graph paper, binder holes. Dark mode dims the desk, not the paper.\n\n",
+        "Mono for the OS, serif for the notebook title.\n",
+        "One scene per gesture: cloth-bound spines, a pencil case, a brass ruler, a page torn off at export.\n\n",
+        "If two screens look the same when you squint, one of them has no object."
     );
     n.pages[0].texts.push(text(72.0, 64.0, 17.0, body, ink));
     // petit plan : trois rectangles d'espacement (gaps Hyprland)

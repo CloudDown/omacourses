@@ -8,9 +8,9 @@ Local data only — `~/.local/share/omacourses`. No account, no sync.
 
 ![Shelf — notebook spines](docs/screens/etagere.png)
 
-![Lined page — Mentalité](docs/screens/feuille.png)
+![Lined page — Mindset](docs/screens/feuille.png)
 
-![Graph paper — Direction artistique](docs/screens/millimetre.png)
+![Graph paper — Art direction](docs/screens/millimetre.png)
 
 ## Run
 
@@ -23,7 +23,7 @@ cahier --data-dir
 Binary: `cahier`. Data: `~/.local/share/omacourses` (or `$CAHIER_DATA`).
 
 ```bash
-CAHIER_OPEN=Mentalité cahier   # open a notebook by title
+CAHIER_OPEN=Mindset cahier   # open a notebook by title
 ```
 
 Theme read from `omarchy theme current` / `colors.toml`.
@@ -43,7 +43,7 @@ Two postures, one well in the pencil case (`k` to toggle). Picking up the stylus
 | | |
 |---|---|
 | `p` `b` `c` `h` | felt-tip, fountain pen, pencil, highlighter |
-| `e` / `shift+e` | sélection (whole stroke) / zone (under cursor) |
+| `e` / `shift+e` | stroke (whole stroke) / area (under cursor) |
 | `l` `t` `i` | lasso, text, image |
 | `[` `]` `1-9` | thickness, ink |
 | `m` | cycle paper (blank, lined, grid, dotted, graph, slate) |
@@ -51,4 +51,4 @@ Two postures, one well in the pencil case (`k` to toggle). Picking up the stylus
 | shift while releasing a stroke | line / circle / rectangle |
 | `ctrl+e` `ctrl+shift+e` | PNG, PDF |
 
-First launch: notebooks *Mentalité* and *Direction artistique*.
+First launch: notebooks *Mindset* and *Art direction*.

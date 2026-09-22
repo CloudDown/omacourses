@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["CloudDown"]
-description = "Cahier — notes au stylet, pupitre Omarchy"
+description = "Cahier — stylus notes on an Omarchy lectern"
 license = "MIT"
 default-run = "cahier"
 
