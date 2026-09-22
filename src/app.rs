@@ -25,8 +25,7 @@ const DOS_W: f32 = 128.0;
 const DOS_H: f32 = 156.0;
 const DOS_PAD: f32 = 10.0;
 const PAPER_PEEK: f32 = 18.0;
-const TITLE_H: f32 = 26.0;
-const ICON_ROW: f32 = 32.0;
+const TITLE_ROW: f32 = 30.0;
 
 #[derive(Clone)]
 enum Scene {
@@ -46,6 +45,15 @@ enum DosAct {
     Toggle,
     Range,
     Restore,
+}
+
+struct Toss {
+    id: Uuid,
+    from: Pos2,
+    cover: u8,
+    emoji: String,
+    t0: f64,
+    delay: f64,
 }
 
 struct Toast {
@@ -127,6 +135,23 @@ pub struct CahierApp {
     shelf_anchor: Option<Uuid>,
     /// Vue corbeille (sinon étagère active).
     shelf_trash: bool,
+    /// Faces des dos, pour le rectangle de sélection.
+    shelf_slots: Vec<(Uuid, Rect)>,
+    /// Origine du rectangle (None = pas de bande).
+    shelf_band: Option<Pos2>,
+    shelf_band_now: Option<Pos2>,
+    shelf_band_add: bool,
+    shelf_band_armed: bool,
+    shelf_band_base: Vec<Uuid>,
+    /// Glisser des dos vers le panier.
+    shelf_haul: Option<Pos2>,
+    shelf_haul_now: Option<Pos2>,
+    shelf_haul_ids: Vec<Uuid>,
+    shelf_haul_armed: bool,
+    shelf_toss: Vec<Toss>,
+    trash_rect: Rect,
+    trash_mouth: Pos2,
+    shelf_fed: bool,
 }
 
 impl CahierApp {
@@ -190,6 +215,20 @@ impl CahierApp {
             shelf_sel: Vec::new(),
             shelf_anchor: None,
             shelf_trash: false,
+            shelf_slots: Vec::new(),
+            shelf_band: None,
+            shelf_band_now: None,
+            shelf_band_add: false,
+            shelf_band_armed: false,
+            shelf_band_base: Vec::new(),
+            shelf_haul: None,
+            shelf_haul_now: None,
+            shelf_haul_ids: Vec::new(),
+            shelf_haul_armed: false,
+            shelf_toss: Vec::new(),
+            trash_rect: Rect::NOTHING,
+            trash_mouth: Pos2::ZERO,
+            shelf_fed: false,
         };
         if let Ok(q) = std::env::var("CAHIER_OPEN") {
             let q = q.trim().to_lowercase();
@@ -973,6 +1012,11 @@ impl CahierApp {
         // Raccourcis étagère (sélection / corbeille)
         if self.emoji_pick.is_none() && self.rename_id.is_none() {
             self.shelf_keys(ctx);
+            self.shelf_pointer_tick(ctx);
+            self.shelf_toss_tick(ctx);
+            if self.shelf_haul_armed || !self.shelf_toss.is_empty() {
+                ctx.request_repaint();
+            }
         }
 
         CentralPanel::default()
@@ -1045,6 +1089,7 @@ impl CahierApp {
                 let notes: Vec<_> = source
                     .into_iter()
                     .filter(|m| query.is_empty() || m.title.to_lowercase().contains(&query))
+                    .filter(|m| !self.shelf_toss.iter().any(|t| t.id == m.id))
                     .collect();
 
                 // Clic dans le vide : désélection
@@ -1058,6 +1103,7 @@ impl CahierApp {
                 }
 
                 if notes.is_empty() {
+                    self.shelf_slots.clear();
                     ui.add_space(48.0);
                     ui.horizontal(|ui| {
                         ui.add_space(78.0);
@@ -1084,6 +1130,7 @@ impl CahierApp {
                     let mut toggle = None;
                     let mut range = None;
                     let ids: Vec<Uuid> = notes.iter().map(|n| n.id).collect();
+                    self.shelf_slots.clear();
 
                     ScrollArea::vertical().show(ui, |ui| {
                         ui.add_space(4.0);
@@ -1122,6 +1169,7 @@ impl CahierApp {
                         }
                     });
 
+                    if !self.shelf_band_armed {
                     if let Some(id) = select {
                         self.shelf_sel = vec![id];
                         self.shelf_anchor = Some(id);
@@ -1149,6 +1197,7 @@ impl CahierApp {
                             self.shelf_anchor = Some(id);
                         }
                     }
+                    }
                     if let Some(id) = emoji_for {
                         self.emoji_pick = Some(id);
                         self.rename_id = None;
@@ -1161,7 +1210,7 @@ impl CahierApp {
                         self.emoji_pick = None;
                     }
                     if let Some(id) = open {
-                        if !self.shelf_trash {
+                        if !self.shelf_trash && !self.shelf_band_armed {
                             self.emoji_pick = None;
                             self.rename_id = None;
                             self.shelf_sel.clear();
@@ -1198,22 +1247,41 @@ impl CahierApp {
                 }
             });
 
-        // Corbeille — bas gauche, face à l'encrier
+        if let (Some(a), Some(b)) = (self.shelf_band, self.shelf_band_now) {
+            if self.shelf_band_armed {
+                Area::new(Id::new("shelf-band"))
+                    .fixed_pos(ctx.screen_rect().min)
+                    .order(Order::Foreground)
+                    .interactable(false)
+                    .show(ctx, |ui| {
+                        let r = Rect::from_two_pos(a, b);
+                        let p = ui.painter();
+                        let fill = self.look.accent.gamma_multiply(0.16);
+                        let stroke = Stroke::new(1.15_f32, self.look.accent.gamma_multiply(0.85));
+                        p.rect_filled(r, CornerRadius::same(2), fill);
+                        p.rect_stroke(r, CornerRadius::same(2), stroke, StrokeKind::Inside);
+                    });
+            }
+        }
+
+        // Panier à papier — coin du pupitre
         Area::new(Id::new("fab-corbeille"))
-            .anchor(Align2::LEFT_BOTTOM, vec2(28.0, -28.0))
+            .anchor(Align2::LEFT_BOTTOM, vec2(18.0, -16.0))
+            .order(Order::Foreground)
             .show(ctx, |ui| {
-                let n = self.lib.index.trash.len();
-                if self
-                    .wastebasket(ui, self.shelf_trash, n)
+                let n = self.lib.index.trash.len() + self.shelf_toss.len();
+                let hungry = self.shelf_haul_armed
+                    && self
+                        .shelf_haul_now
+                        .is_some_and(|p| self.trash_rect.expand(18.0).contains(p));
+                let resp = self
+                    .wastebasket(ui, self.shelf_trash, n, hungry)
                     .on_hover_text(if self.shelf_trash {
                         "Étagère"
-                    } else if n == 0 {
-                        "Corbeille"
                     } else {
-                        "Corbeille"
-                    })
-                    .clicked()
-                {
+                        "Panier"
+                    });
+                if resp.clicked() && !self.shelf_fed && !self.shelf_haul_armed {
                     self.shelf_trash = !self.shelf_trash;
                     self.shelf_sel.clear();
                     self.shelf_anchor = None;
@@ -1342,9 +1410,16 @@ impl CahierApp {
                     self.lib.save_index();
                 }
             });
+        self.paint_shelf_haul(ctx);
         if let Some(id) = self.emoji_pick {
             self.ui_emoji_picker(ctx, id);
         }
+        if ctx.input(|i| i.pointer.primary_released()) {
+            self.shelf_band = None;
+            self.shelf_band_now = None;
+            self.shelf_band_armed = false;
+        }
+        self.shelf_fed = false;
     }
 
     fn shelf_keys(&mut self, ctx: &Context) {
@@ -1404,73 +1479,419 @@ impl CahierApp {
         }
     }
 
-    fn wastebasket(&self, ui: &mut Ui, open: bool, count: usize) -> Response {
-        let size = 56.0;
-        let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
-        let p = ui.painter();
-        let c = rect.center();
-        let well = if open || resp.hovered() {
-            self.look.desk_edge
-        } else {
-            self.look.desk_deep
+    fn shelf_pointer_tick(&mut self, ctx: &Context) {
+        let typing = ctx.wants_keyboard_input();
+        let (pressed, down, released, pos, add) = ctx.input(|i| {
+            (
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.pointer.primary_released(),
+                i.pointer.interact_pos(),
+                i.modifiers.command || i.modifiers.shift,
+            )
+        });
+        let Some(pos) = pos else {
+            if released {
+                self.shelf_band = None;
+                self.shelf_band_now = None;
+                self.shelf_band_armed = false;
+                self.shelf_haul = None;
+                self.shelf_haul_now = None;
+                self.shelf_haul_armed = false;
+            }
+            return;
         };
-        p.circle_filled(c, 25.0, well);
-        p.circle_stroke(
-            c,
-            25.0,
-            Stroke::new(1.2_f32, self.look.muted.gamma_multiply(0.7)),
-        );
-        // Panier fil de fer
-        let ink = if open {
-            self.look.accent
-        } else {
-            self.look.paper.gamma_multiply(0.75)
-        };
-        let top = c + vec2(0.0, -8.0);
-        let bot = c + vec2(0.0, 10.0);
-        let w_top = 11.0;
-        let w_bot = 8.0;
-        p.line_segment(
-            [top + vec2(-w_top, 0.0), top + vec2(w_top, 0.0)],
-            Stroke::new(1.4_f32, ink),
-        );
-        p.line_segment(
-            [top + vec2(-w_top, 0.0), bot + vec2(-w_bot, 0.0)],
-            Stroke::new(1.3_f32, ink),
-        );
-        p.line_segment(
-            [top + vec2(w_top, 0.0), bot + vec2(w_bot, 0.0)],
-            Stroke::new(1.3_f32, ink),
-        );
-        p.line_segment(
-            [bot + vec2(-w_bot, 0.0), bot + vec2(w_bot, 0.0)],
-            Stroke::new(1.3_f32, ink),
-        );
-        for t in [0.35_f32, 0.65] {
-            let y = top.y + (bot.y - top.y) * t;
-            let w = w_top + (w_bot - w_top) * t;
-            p.line_segment(
-                [pos2(c.x - w, y), pos2(c.x + w, y)],
-                Stroke::new(1.0_f32, ink.gamma_multiply(0.7)),
-            );
-        }
-        // Anse
-        p.circle_stroke(top + vec2(0.0, -3.5), 4.0, Stroke::new(1.2_f32, ink));
-        if count > 0 && !open {
-            p.circle_filled(c + vec2(12.0, -12.0), 5.5, self.look.accent);
-            p.text(
-                c + vec2(12.0, -12.0),
-                Align2::CENTER_CENTER,
-                if count > 9 {
-                    "9+".to_string()
+        let screen = ctx.screen_rect();
+        let chrome = pos.y < screen.min.y + 76.0 || pos.x < screen.min.x + 12.0;
+        let on_trash = self.trash_rect.expand(12.0).contains(pos);
+        let hit = self
+            .shelf_slots
+            .iter()
+            .find(|(_, r)| r.contains(pos))
+            .map(|(id, _)| *id);
+
+        if pressed && !typing && !on_trash {
+            if let Some(id) = hit {
+                if !add && !self.shelf_trash {
+                    self.shelf_haul = Some(pos);
+                    self.shelf_haul_now = Some(pos);
+                    self.shelf_haul_armed = false;
+                    self.shelf_haul_ids = if self.shelf_sel.contains(&id) {
+                        self.shelf_sel.clone()
+                    } else {
+                        vec![id]
+                    };
                 } else {
-                    count.to_string()
-                },
-                self.look.mono(9.0),
-                self.look.desk_deep,
+                    self.shelf_band = Some(pos);
+                    self.shelf_band_now = Some(pos);
+                    self.shelf_band_add = add;
+                    self.shelf_band_armed = false;
+                    self.shelf_band_base = self.shelf_sel.clone();
+                }
+            } else if !chrome && pos.y < screen.max.y - 100.0 {
+                self.shelf_band = Some(pos);
+                self.shelf_band_now = Some(pos);
+                self.shelf_band_add = add;
+                self.shelf_band_armed = false;
+                self.shelf_band_base = self.shelf_sel.clone();
+            }
+        }
+        if down {
+            if let Some(origin) = self.shelf_haul {
+                self.shelf_haul_now = Some(pos);
+                if origin.distance(pos) > 12.0 {
+                    self.shelf_haul_armed = true;
+                    if let Some(id) = self.shelf_haul_ids.first().copied() {
+                        if !self.shelf_sel.contains(&id) {
+                            self.shelf_sel = self.shelf_haul_ids.clone();
+                            self.shelf_anchor = Some(id);
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+            } else if let Some(origin) = self.shelf_band {
+                self.shelf_band_now = Some(pos);
+                if origin.distance(pos) > 11.0 {
+                    self.shelf_band_armed = true;
+                    let band = Rect::from_two_pos(origin, pos);
+                    let hits: Vec<Uuid> = self
+                        .shelf_slots
+                        .iter()
+                        .filter(|(_, face)| face.intersects(band))
+                        .map(|(id, _)| *id)
+                        .collect();
+                    if self.shelf_band_add {
+                        let mut out = self.shelf_band_base.clone();
+                        for id in hits {
+                            if !out.contains(&id) {
+                                out.push(id);
+                            }
+                        }
+                        self.shelf_sel = out;
+                    } else {
+                        self.shelf_sel = hits;
+                    }
+                    if let Some(id) = self.shelf_sel.last().copied() {
+                        self.shelf_anchor = Some(id);
+                    }
+                    ctx.request_repaint();
+                }
+            }
+        }
+        if released {
+            if self.shelf_haul_armed {
+                let over = self
+                    .shelf_haul_now
+                    .is_some_and(|p| self.trash_rect.expand(22.0).contains(p));
+                if over && !self.shelf_trash {
+                    self.begin_toss(ctx.input(|i| i.time));
+                    self.shelf_fed = true;
+                }
+                self.shelf_haul = None;
+                self.shelf_haul_now = None;
+                self.shelf_haul_armed = false;
+                self.shelf_haul_ids.clear();
+            } else if self.shelf_haul.is_some() {
+                self.shelf_haul = None;
+                self.shelf_haul_now = None;
+                self.shelf_haul_ids.clear();
+            }
+            if !self.shelf_band_armed {
+                if let Some(origin) = self.shelf_band {
+                    let on_slot = self.shelf_slots.iter().any(|(_, r)| r.contains(origin));
+                    if !on_slot && !self.shelf_band_add && !chrome && !on_trash {
+                        self.shelf_sel.clear();
+                        self.shelf_anchor = None;
+                    }
+                }
+                self.shelf_band = None;
+                self.shelf_band_now = None;
+            }
+        }
+    }
+
+    fn begin_toss(&mut self, now: f64) {
+        let from = self.shelf_haul_now.unwrap_or(self.trash_mouth);
+        let ids = self.shelf_haul_ids.clone();
+        for (i, id) in ids.iter().enumerate() {
+            let meta = self
+                .lib
+                .index
+                .notes
+                .iter()
+                .find(|m| m.id == *id)
+                .cloned();
+            let Some(meta) = meta else {
+                continue;
+            };
+            self.shelf_toss.push(Toss {
+                id: *id,
+                from: from + vec2(i as f32 * 10.0, i as f32 * 7.0),
+                cover: meta.cover,
+                emoji: meta.emoji.clone(),
+                t0: now,
+                delay: i as f64 * 0.055,
+            });
+        }
+        self.shelf_sel.retain(|id| !ids.contains(id));
+    }
+
+    fn shelf_toss_tick(&mut self, ctx: &Context) {
+        if self.shelf_toss.is_empty() {
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        let dur = 0.46;
+        let mut done = Vec::new();
+        self.shelf_toss.retain(|t| {
+            if now - t.t0 - t.delay >= dur {
+                done.push(t.id);
+                false
+            } else {
+                true
+            }
+        });
+        for id in done {
+            self.lib.trash_note(id);
+        }
+        ctx.request_repaint();
+    }
+
+    fn wastebasket(&mut self, ui: &mut Ui, open: bool, count: usize, hungry: bool) -> Response {
+        let w = 92.0;
+        let h = 86.0;
+        let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+        self.trash_rect = rect;
+        let p = ui.painter();
+        let id = Id::new("waste-basket");
+        let hover_t = ui.ctx().animate_bool_with_time(
+            id.with("h"),
+            resp.hovered() || hungry || open,
+            0.18,
+        );
+        let e = hover_t * hover_t * (3.0 - 2.0 * hover_t);
+        let lift = e * 3.0;
+        let mouth = pos2(rect.center().x, rect.min.y + 22.0 - lift);
+        self.trash_mouth = mouth;
+
+        let wicker = mix_col(self.look.desk_edge, self.look.ink, 0.18);
+        let rib = mix_col(wicker, self.look.paper, 0.12);
+        let hole = self.look.desk_deep;
+        let rim = mix_col(self.look.paper, self.look.accent, 0.16 + 0.22 * e);
+
+        // Ombre au sol
+        p.add(Shape::ellipse_filled(
+            pos2(rect.center().x + 2.0, rect.max.y - 6.0 + e),
+            vec2(30.0 + e * 2.0, 7.0),
+            self.look.shadow.gamma_multiply(0.45 + 0.15 * e),
+        ));
+
+        let top_w = 34.0 + e * 4.0;
+        let bot_w = 24.0;
+        let body_top = mouth.y + 6.0;
+        let body_bot = rect.max.y - 10.0;
+        let body = [
+            pos2(mouth.x - top_w, body_top),
+            pos2(mouth.x + top_w, body_top),
+            pos2(mouth.x + bot_w, body_bot),
+            pos2(mouth.x - bot_w, body_bot),
+        ];
+        p.add(Shape::convex_polygon(
+            body.to_vec(),
+            wicker,
+            Stroke::NONE,
+        ));
+        // Côté ombré
+        p.add(Shape::convex_polygon(
+            vec![
+                pos2(mouth.x + top_w * 0.15, body_top),
+                pos2(mouth.x + top_w, body_top),
+                pos2(mouth.x + bot_w, body_bot),
+                pos2(mouth.x + bot_w * 0.2, body_bot),
+            ],
+            shade_rgb(wicker, 0.72),
+            Stroke::NONE,
+        ));
+
+        let wire = Stroke::new(1.25_f32, rib.gamma_multiply(0.85));
+        for t in [0.28_f32, 0.55, 0.82] {
+            let y = body_top + (body_bot - body_top) * t;
+            let hw = top_w + (bot_w - top_w) * t;
+            p.line_segment(
+                [pos2(mouth.x - hw + 1.0, y), pos2(mouth.x + hw - 1.0, y)],
+                wire,
             );
         }
-        resp.on_hover_cursor(CursorIcon::PointingHand)
+        for k in [-0.55_f32, 0.0, 0.55] {
+            p.line_segment(
+                [
+                    pos2(mouth.x + top_w * k, body_top + 1.0),
+                    pos2(mouth.x + bot_w * k, body_bot - 1.0),
+                ],
+                Stroke::new(1.05_f32, rib.gamma_multiply(0.55)),
+            );
+        }
+
+        // Bouche : ellipse, on voit le fond du panier
+        let rx = 32.0 + e * 5.0;
+        let ry = 11.0 + e * 2.0;
+        p.add(Shape::ellipse_filled(mouth + vec2(0.0, 2.0), vec2(rx, ry), hole));
+        p.add(Shape::ellipse_stroke(
+            mouth,
+            vec2(rx, ry),
+            Stroke::new(2.4_f32, rim),
+        ));
+        p.add(Shape::ellipse_stroke(
+            mouth + vec2(0.0, 1.4),
+            vec2(rx - 3.0, ry - 2.0),
+            Stroke::new(1.0_f32, hole.gamma_multiply(0.7)),
+        ));
+
+        // Feuille froissée qui dépasse
+        if count > 0 || hungry {
+            let paper = mix_col(self.look.paper, self.look.accent, 0.04);
+            let peek = mouth + vec2(-6.0 + e * 3.0, -4.0 - e * 5.0);
+            p.add(Shape::convex_polygon(
+                vec![
+                    peek + vec2(-8.0, 4.0),
+                    peek + vec2(11.0, 1.0),
+                    peek + vec2(9.0, 10.0),
+                    peek + vec2(-5.0, 11.0),
+                ],
+                paper,
+                Stroke::NONE,
+            ));
+            p.line_segment(
+                [peek + vec2(-4.0, 6.0), peek + vec2(6.0, 5.0)],
+                Stroke::new(0.8_f32, self.look.paper_rule),
+            );
+        }
+        if count > 1 {
+            let paper = self.look.paper.gamma_multiply(0.92);
+            p.add(Shape::convex_polygon(
+                vec![
+                    mouth + vec2(8.0, -1.0),
+                    mouth + vec2(16.0, 2.0),
+                    mouth + vec2(12.0, 8.0),
+                    mouth + vec2(5.0, 6.0),
+                ],
+                paper,
+                Stroke::NONE,
+            ));
+        }
+
+        resp.on_hover_cursor(if hungry {
+            CursorIcon::Move
+        } else {
+            CursorIcon::PointingHand
+        })
+    }
+
+    fn paint_dos_at(
+        &mut self,
+        ctx: &Context,
+        painter: &Painter,
+        center: Pos2,
+        scale: f32,
+        alpha: f32,
+        cover: u8,
+        emoji: &str,
+    ) {
+        let w = DOS_W * scale;
+        let h = DOS_H * scale;
+        let face = Rect::from_center_size(center, vec2(w, h));
+        let fade = |c: Color32| {
+            Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * alpha) as u8)
+        };
+        let cloth = fade(self.look.cloth_at(cover));
+        let cloth_deep = fade(shade_rgb(self.look.cloth_at(cover), 0.70));
+        let paper = fade(self.look.paper);
+        painter.rect_filled(
+            face.translate(vec2(2.0 * scale, 3.0 * scale)),
+            CornerRadius::same(8),
+            fade(self.look.shadow.gamma_multiply(0.35)),
+        );
+        painter.rect_filled(face, CornerRadius::same(8), cloth);
+        let spine = Rect::from_min_max(face.min, pos2(face.min.x + 13.0 * scale, face.max.y));
+        painter.rect_filled(
+            spine,
+            CornerRadius {
+                nw: 8,
+                ne: 0,
+                sw: 8,
+                se: 0,
+            },
+            cloth_deep,
+        );
+        painter.rect_stroke(
+            face,
+            CornerRadius::same(8),
+            Stroke::new(1.0_f32, fade(shade_rgb(self.look.cloth_at(cover), 0.48))),
+            StrokeKind::Inside,
+        );
+        let logo = Rect::from_center_size(face.center(), vec2(56.0 * scale, 56.0 * scale));
+        if emoji.trim().is_empty() || !self.paint_emoji(ctx, painter, logo, emoji) {
+            painter.text(
+                face.center(),
+                Align2::CENTER_CENTER,
+                "+",
+                self.look.serif(28.0 * scale),
+                fade(self.look.paper.gamma_multiply(0.55)),
+            );
+        }
+        let _ = paper;
+    }
+
+    fn paint_shelf_haul(&mut self, ctx: &Context) {
+        let now = ctx.input(|i| i.time);
+        let mut ghosts: Vec<(Pos2, f32, f32, u8, String)> = Vec::new();
+        if self.shelf_haul_armed {
+            if let Some(pos) = self.shelf_haul_now {
+                for (i, id) in self.shelf_haul_ids.iter().enumerate() {
+                    if let Some(m) = self.lib.index.notes.iter().find(|n| n.id == *id) {
+                        ghosts.push((
+                            pos + vec2(i as f32 * 11.0, i as f32 * 8.0),
+                            0.88,
+                            1.0,
+                            m.cover,
+                            m.emoji.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+        let mouth = self.trash_mouth;
+        let dur = 0.46;
+        for t in &self.shelf_toss {
+            let u = ((now - t.t0 - t.delay) / dur).clamp(0.0, 1.0) as f32;
+            if now - t.t0 < t.delay {
+                ghosts.push((t.from, 0.88, 1.0, t.cover, t.emoji.clone()));
+                continue;
+            }
+            let s = u * u;
+            let p = t.from.lerp(mouth, s);
+            let dip = (s * std::f32::consts::PI).sin() * 36.0 * (1.0 - s);
+            ghosts.push((
+                p + vec2(0.0, dip),
+                0.88 * (1.0 - 0.78 * s),
+                1.0 - 0.55 * s,
+                t.cover,
+                t.emoji.clone(),
+            ));
+        }
+        if ghosts.is_empty() {
+            return;
+        }
+        Area::new(Id::new("shelf-haul"))
+            .fixed_pos(ctx.screen_rect().min)
+            .order(Order::Foreground)
+            .interactable(false)
+            .show(ctx, |ui| {
+                let painter = ui.painter().clone();
+                for (c, sc, a, cover, em) in ghosts {
+                    self.paint_dos_at(ctx, &painter, c, sc, a, cover, &em);
+                }
+            });
     }
 
     /// Signet de la fiche : papier, cran en V, astérisque de marge.
@@ -1798,26 +2219,21 @@ impl CahierApp {
         true
     }
 
-    /// Casse à caractères : tiroirs de marques pour le dos.
+    /// Planche de timbres arrachée d'un catalogue — à détacher et coller sur le dos.
     fn ui_emoji_picker(&mut self, ctx: &Context, note_id: Uuid) {
         let mut chosen: Option<String> = None;
         let mut dismiss = false;
         let screen = ctx.screen_rect();
-        let drawer_w = (screen.width() * 0.72).clamp(420.0, 760.0);
-        let drawer_h = (screen.height() * 0.78).clamp(420.0, 640.0);
+        let sheet_w = (screen.width() * 0.68).clamp(400.0, 700.0);
+        let sheet_h = (screen.height() * 0.80).clamp(440.0, 680.0);
 
-        // Fond de pupitre assombri
         Area::new(Id::new("emoji-dim"))
             .fixed_pos(screen.min)
             .order(Order::Foreground)
             .interactable(true)
             .show(ctx, |ui| {
                 let (r, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
-                ui.painter().rect_filled(
-                    r,
-                    CornerRadius::ZERO,
-                    Color32::from_rgba_unmultiplied(0, 0, 0, 120),
-                );
+                ui.painter().rect_filled(r, CornerRadius::ZERO, Color32::TRANSPARENT);
                 if resp.clicked() {
                     dismiss = true;
                 }
@@ -1827,210 +2243,181 @@ impl CahierApp {
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .order(Order::Foreground)
             .show(ctx, |ui| {
-                let wood = mix_col(self.look.desk_deep, self.look.accent, 0.06);
-                let wood_edge = mix_col(self.look.ink, self.look.desk_edge, 0.35);
                 let paper = mix_col(self.look.paper, self.look.accent, 0.03);
                 let ink = self.look.ink;
+                let mute = ink.gamma_multiply(0.42);
+                let (outer, _sheet_resp) =
+                    ui.allocate_exact_size(vec2(sheet_w, sheet_h), Sense::hover());
+                let p = ui.painter_at(outer);
 
-                Frame::NONE
-                    .fill(wood)
-                    .stroke(Stroke::new(1.2_f32, wood_edge.gamma_multiply(0.55)))
-                    .corner_radius(6)
-                    .inner_margin(Margin::symmetric(14, 12))
-                    .shadow(egui::Shadow {
-                        offset: [0, 10],
-                        blur: 28,
-                        spread: 0,
-                        color: self.look.shadow.gamma_multiply(0.7),
-                    })
-                    .show(ui, |ui| {
-                        ui.set_width(drawer_w);
-                        ui.set_max_height(drawer_h);
+                p.rect_filled(
+                    outer.translate(vec2(5.0, 8.0)),
+                    CornerRadius::same(2),
+                    self.look.shadow.gamma_multiply(0.50),
+                );
+                p.rect_filled(
+                    outer.translate(vec2(2.0, 3.0)),
+                    CornerRadius::same(2),
+                    self.look.shadow.gamma_multiply(0.22),
+                );
+                p.rect_filled(outer, CornerRadius::same(2), paper);
 
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("Marque")
-                                    .font(self.look.serif(26.0))
-                                    .color(paper),
-                            );
-                            ui.add_space(10.0);
-                            ui.label(
-                                RichText::new("casse à caractères")
-                                    .font(self.look.mono(11.0))
-                                    .color(paper.gamma_multiply(0.45)),
-                            );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui
-                                    .add(
-                                        Label::new(
-                                            RichText::new("fermer")
-                                                .font(self.look.mono(12.0))
-                                                .color(paper.gamma_multiply(0.55)),
-                                        )
-                                        .sense(Sense::click()),
+                // Bord arraché à gauche
+                let mut tear = Vec::new();
+                let mut y = outer.min.y;
+                let mut flip = true;
+                tear.push(pos2(outer.min.x + 10.0, outer.min.y));
+                while y < outer.max.y {
+                    y += 7.0;
+                    let x = outer.min.x + if flip { 3.0 } else { 11.0 };
+                    tear.push(pos2(x, y.min(outer.max.y)));
+                    flip = !flip;
+                }
+                for w in tear.windows(2) {
+                    p.line_segment([w[0], w[1]], Stroke::new(1.05_f32, ink.gamma_multiply(0.28)));
+                }
+                p.rect_filled(
+                    Rect::from_min_max(outer.min, pos2(outer.min.x + 2.0, outer.max.y)),
+                    0.0,
+                    self.look.desk,
+                );
+
+                // Coin plié
+                let ear = [
+                    pos2(outer.max.x - 26.0, outer.min.y),
+                    pos2(outer.max.x, outer.min.y),
+                    pos2(outer.max.x, outer.min.y + 26.0),
+                ];
+                p.add(Shape::convex_polygon(
+                    ear.to_vec(),
+                    mix_col(paper, ink, 0.10),
+                    Stroke::NONE,
+                ));
+                p.line_segment(
+                    [ear[0], ear[2]],
+                    Stroke::new(1.0_f32, ink.gamma_multiply(0.16)),
+                );
+
+                p.rect_stroke(
+                    outer,
+                    CornerRadius::same(2),
+                    Stroke::new(1.0_f32, ink.gamma_multiply(0.14)),
+                    StrokeKind::Inside,
+                );
+
+                let inner = outer.shrink2(vec2(22.0, 16.0));
+                ui.scope_builder(UiBuilder::new().max_rect(inner), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Vignettes")
+                                .font(self.look.serif(24.0))
+                                .color(ink),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("à détacher")
+                                .font(self.look.mono(11.0))
+                                .color(mute),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    Label::new(
+                                        RichText::new("replier")
+                                            .font(self.look.mono(11.0))
+                                            .color(mute),
                                     )
-                                    .clicked()
-                                {
-                                    dismiss = true;
-                                }
-                            });
-                        });
-                        ui.add_space(6.0);
-                        ui.painter().hline(
-                            ui.max_rect().x_range(),
-                            ui.cursor().top(),
-                            Stroke::new(1.0_f32, paper.gamma_multiply(0.18)),
-                        );
-                        ui.add_space(10.0);
-
-                        // Favoris — rangée de tampons
-                        ui.label(
-                            RichText::new("fréquents")
-                                .font(self.look.mono(10.0))
-                                .color(paper.gamma_multiply(0.4)),
-                        );
-                        ui.add_space(4.0);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = vec2(5.0, 5.0);
-                            for em in FAVORITES {
-                                if self.casse_cell(ui, ctx, paper, ink, em, &mut chosen) {
-                                    // chosen set inside
-                                }
-                            }
-                            if self.casse_clear(ui, paper, ink) {
-                                chosen = Some(String::new());
+                                    .sense(Sense::click()),
+                                )
+                                .clicked()
+                            {
+                                dismiss = true;
                             }
                         });
-                        ui.add_space(12.0);
+                    });
+                    ui.add_space(2.0);
+                    let rule_y = ui.cursor().top();
+                    ui.painter().line_segment(
+                        [pos2(inner.min.x, rule_y), pos2(inner.max.x - 20.0, rule_y)],
+                        Stroke::new(1.2_f32, self.look.accent.gamma_multiply(0.75)),
+                    );
+                    ui.add_space(10.0);
 
-                        // Filtre : coller ou taper un caractère
-                        Frame::NONE
-                            .fill(paper.gamma_multiply(0.12))
-                            .corner_radius(4)
-                            .inner_margin(Margin::symmetric(10, 6))
-                            .show(ui, |ui| {
-                                let te = TextEdit::singleline(&mut self.emoji_query)
-                                    .hint_text("coller un emoji · filtrer")
-                                    .font(self.look.mono(13.0))
-                                    .text_color(paper)
-                                    .frame(false);
-                                ui.add(te.desired_width(ui.available_width()));
-                            });
-                        ui.add_space(8.0);
-
-                        let q = self.emoji_query.clone();
-                        let q = q.trim().to_string();
-                        // Si la requête est exactement un emoji, proposer de valider
-                        if !q.is_empty() && self.emoji.key(&q).is_some() && q.chars().count() <= 4 {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new("utiliser")
-                                        .font(self.look.mono(11.0))
-                                        .color(paper.gamma_multiply(0.5)),
-                                );
-                                if self.casse_cell(ui, ctx, paper, ink, &q, &mut chosen) {
-                                    // ok
-                                }
-                            });
-                            ui.add_space(6.0);
-                        }
-
-                        let catalog: Vec<char> = {
-                            let all = self.emoji.catalog();
-                            if q.is_empty() {
-                                all.to_vec()
-                            } else if q.chars().any(|c| self.emoji.catalog().contains(&c)) {
-                                all.iter()
-                                    .copied()
-                                    .filter(|ch| q.contains(*ch))
-                                    .collect()
-                            } else {
-                                // Texte libre : on garde toute la casse (le filtre emoji est coller).
-                                all.to_vec()
-                            }
-                        };
-
+                    ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new(format!("toute la casse · {}", catalog.len()))
+                            RichText::new("souvent")
                                 .font(self.look.mono(10.0))
-                                .color(paper.gamma_multiply(0.4)),
-                        );
-                        ui.add_space(4.0);
-
-                        let cell = 38.0;
-                        let gap = 3.0;
-                        let cols = ((drawer_w - 28.0) / (cell + gap)).floor().max(6.0) as usize;
-                        let rows_vis = 9;
-                        ScrollArea::vertical()
-                            .max_height(cell * rows_vis as f32 + gap * (rows_vis as f32 - 1.0))
-                            .show(ui, |ui| {
-                                Frame::NONE
-                                    .fill(paper)
-                                    .stroke(Stroke::new(1.0_f32, ink.gamma_multiply(0.12)))
-                                    .corner_radius(3)
-                                    .inner_margin(Margin::same(8))
-                                    .show(ui, |ui| {
-                                        ui.spacing_mut().item_spacing = vec2(gap, gap);
-                                        let mut i = 0;
-                                        while i < catalog.len() {
-                                            ui.horizontal(|ui| {
-                                                for _ in 0..cols {
-                                                    if i >= catalog.len() {
-                                                        break;
-                                                    }
-                                                    let ch = catalog[i];
-                                                    i += 1;
-                                                    let em = ch.to_string();
-                                                    let (rect, resp) = ui.allocate_exact_size(
-                                                        vec2(cell, cell),
-                                                        Sense::click(),
-                                                    );
-                                                    let p = ui.painter();
-                                                    // Compartiment
-                                                    p.rect_stroke(
-                                                        rect,
-                                                        CornerRadius::same(2),
-                                                        Stroke::new(
-                                                            0.7_f32,
-                                                            ink.gamma_multiply(0.10),
-                                                        ),
-                                                        StrokeKind::Inside,
-                                                    );
-                                                    if resp.hovered() {
-                                                        p.rect_filled(
-                                                            rect.shrink(1.0),
-                                                            CornerRadius::same(2),
-                                                            self.look.accent.gamma_multiply(0.18),
-                                                        );
-                                                    }
-                                                    self.paint_emoji(
-                                                        ctx,
-                                                        &p,
-                                                        rect.shrink(4.0),
-                                                        &em,
-                                                    );
-                                                    if resp.clicked() {
-                                                        chosen = Some(em);
-                                                    }
-                                                }
-                                            });
-                                        }
-                                    });
-                            });
-
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new("esc · clic hors de la casse")
-                                .font(self.look.mono(10.0))
-                                .color(paper.gamma_multiply(0.35)),
+                                .color(mute),
                         );
                     });
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                        for em in FAVORITES {
+                            if self.stamp_cell(ui, ctx, paper, ink, Some(em), &mut chosen) {
+                                // chosen
+                            }
+                        }
+                        if self.stamp_cell(ui, ctx, paper, ink, None, &mut chosen) {
+                            chosen = Some(String::new());
+                        }
+                    });
+                    ui.add_space(10.0);
+
+                    let line = ui.cursor();
+                    ui.painter().line_segment(
+                        [
+                            pos2(inner.min.x, line.top() + 20.0),
+                            pos2(inner.max.x, line.top() + 20.0),
+                        ],
+                        Stroke::new(0.8_f32, self.look.paper_rule),
+                    );
+                    let te = TextEdit::singleline(&mut self.emoji_query)
+                        .hint_text("coller une vignette")
+                        .font(self.look.serif(15.0))
+                        .text_color(ink)
+                        .frame(false);
+                    ui.add(te.desired_width(inner.width()));
+                    ui.add_space(8.0);
+
+                    let q = self.emoji_query.trim().to_string();
+                    let catalog: Vec<char> = {
+                        let all = self.emoji.catalog();
+                        if q.is_empty() {
+                            all.to_vec()
+                        } else if q.chars().any(|c| all.contains(&c)) {
+                            all.iter().copied().filter(|ch| q.contains(*ch)).collect()
+                        } else {
+                            all.to_vec()
+                        }
+                    };
+
+                    let cell = 40.0;
+                    let gap = 2.0;
+                    let cols = ((inner.width() - 8.0) / (cell + gap)).floor().max(6.0) as usize;
+                    let grid_h = (inner.max.y - ui.cursor().top() - 8.0).max(160.0);
+                    ScrollArea::vertical().max_height(grid_h).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = vec2(gap, gap);
+                        let mut i = 0;
+                        while i < catalog.len() {
+                            ui.horizontal(|ui| {
+                                for _ in 0..cols {
+                                    if i >= catalog.len() {
+                                        break;
+                                    }
+                                    let em = catalog[i].to_string();
+                                    i += 1;
+                                    self.stamp_cell(ui, ctx, paper, ink, Some(&em), &mut chosen);
+                                }
+                            });
+                        }
+                    });
+                });
             });
 
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             dismiss = true;
         }
-        // Coller depuis le presse-papiers
         if ctx.input(|i| i.events.iter().any(|e| matches!(e, Event::Paste(_)))) {
             if let Some(s) = ctx.input(|i| {
                 i.events.iter().find_map(|e| match e {
@@ -2061,59 +2448,65 @@ impl CahierApp {
         }
     }
 
-    fn casse_cell(
+    fn stamp_cell(
         &mut self,
         ui: &mut Ui,
         ctx: &Context,
         paper: Color32,
         ink: Color32,
-        em: &str,
+        em: Option<&str>,
         chosen: &mut Option<String>,
     ) -> bool {
         let (rect, resp) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
         let p = ui.painter();
-        p.rect_filled(rect, CornerRadius::same(3), paper.gamma_multiply(0.14));
-        p.rect_stroke(
+        let edge = ink.gamma_multiply(if resp.hovered() { 0.38 } else { 0.16 });
+        p.rect_filled(
             rect,
-            CornerRadius::same(3),
-            Stroke::new(0.8_f32, paper.gamma_multiply(0.22)),
-            StrokeKind::Inside,
+            CornerRadius::same(1),
+            if resp.hovered() {
+                mix_col(paper, self.look.accent, 0.10)
+            } else {
+                paper
+            },
         );
-        if resp.hovered() {
-            p.rect_filled(
-                rect,
-                CornerRadius::same(3),
-                self.look.accent.gamma_multiply(0.25),
-            );
+        // Dentelure
+        let step = 4.0;
+        let mut x = rect.min.x + 2.0;
+        while x < rect.max.x - 1.0 {
+            p.circle_filled(pos2(x, rect.min.y), 0.85, self.look.desk.gamma_multiply(0.35));
+            p.circle_filled(pos2(x, rect.max.y), 0.85, self.look.desk.gamma_multiply(0.35));
+            x += step;
         }
-        self.paint_emoji(ctx, &p, rect.shrink(4.0), em);
-        let _ = (paper, ink);
-        if resp.clicked() {
-            *chosen = Some(em.to_string());
-            true
-        } else {
-            false
+        let mut y = rect.min.y + 2.0;
+        while y < rect.max.y - 1.0 {
+            p.circle_filled(pos2(rect.min.x, y), 0.85, self.look.desk.gamma_multiply(0.35));
+            p.circle_filled(pos2(rect.max.x, y), 0.85, self.look.desk.gamma_multiply(0.35));
+            y += step;
         }
-    }
-
-    fn casse_clear(&self, ui: &mut Ui, paper: Color32, ink: Color32) -> bool {
-        let (rect, resp) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
-        let p = ui.painter();
-        p.rect_stroke(
-            rect,
-            CornerRadius::same(3),
-            Stroke::new(0.9_f32, paper.gamma_multiply(0.28)),
-            StrokeKind::Inside,
-        );
-        p.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            "×",
-            self.look.mono(16.0),
-            paper.gamma_multiply(0.55),
-        );
-        let _ = ink;
-        resp.clicked()
+        p.rect_stroke(rect, CornerRadius::same(1), Stroke::new(0.7_f32, edge), StrokeKind::Inside);
+        match em {
+            Some(em) => {
+                self.paint_emoji(ctx, &p, rect.shrink(5.0), em);
+                if resp.clicked() {
+                    *chosen = Some(em.to_string());
+                    return true;
+                }
+            }
+            None => {
+                p.text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    "×",
+                    self.look.mono(15.0),
+                    ink.gamma_multiply(0.45),
+                );
+                if resp.clicked() {
+                    *chosen = Some(String::new());
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn cahier_dos(
@@ -2124,7 +2517,7 @@ impl CahierApp {
     ) -> Option<DosAct> {
         let slot = vec2(
             DOS_W + DOS_PAD * 2.0,
-            DOS_PAD + PAPER_PEEK + DOS_H + ICON_ROW,
+            DOS_PAD + PAPER_PEEK + DOS_H + TITLE_ROW,
         );
         let (slot_rect, resp) = ui.allocate_exact_size(slot, Sense::click());
         let id = Id::new("cahier-dos").with(meta.id);
@@ -2150,6 +2543,20 @@ impl CahierApp {
             vec2(DOS_W, DOS_H),
         );
         let painter = ui.painter_at(slot_rect);
+        let hit = Rect::from_min_max(
+            face.min,
+            pos2(face.max.x, face.max.y + TITLE_ROW),
+        );
+        self.shelf_slots.push((meta.id, hit));
+        let lifted = self.shelf_haul_armed && self.shelf_haul_ids.contains(&meta.id);
+        if lifted {
+            painter.rect_filled(
+                face.translate(vec2(2.0, 4.0)),
+                CornerRadius::same(8),
+                self.look.shadow.gamma_multiply(0.18),
+            );
+            return None;
+        }
 
         painter.rect_filled(
             face.translate(vec2(3.0, 5.0 + 1.5 * e)),
@@ -2245,10 +2652,10 @@ impl CahierApp {
             );
         }
 
-        // Centre du cartonnage, hors dos et hors titre.
+        // Centre du cartonnage (le titre est sous le dos).
         let cover = Rect::from_min_max(
-            pos2(face.min.x + 13.0, face.min.y + 14.0),
-            pos2(face.max.x - 6.0, face.max.y - TITLE_H - 16.0),
+            pos2(face.min.x + 13.0, face.min.y + 12.0),
+            pos2(face.max.x - 6.0, face.max.y - 12.0),
         );
         let mark = cover.center();
         let logo_r = Rect::from_center_size(mark, vec2(56.0, 56.0));
@@ -2281,15 +2688,15 @@ impl CahierApp {
         }
 
         let title_rect = Rect::from_min_size(
-            pos2(face.min.x + 16.0, face.max.y - TITLE_H - 10.0),
-            vec2(face.width() - 20.0, TITLE_H),
+            pos2(face.min.x, face.max.y + 4.0),
+            vec2(face.width(), TITLE_ROW),
         );
         let renaming = self.rename_id == Some(meta.id) && !self.shelf_trash;
         if renaming {
             let mut commit = false;
             let mut cancel = false;
             ui.scope_builder(UiBuilder::new().max_rect(title_rect), |ui| {
-                ui.visuals_mut().override_text_color = Some(paper);
+                ui.visuals_mut().override_text_color = Some(self.look.fg);
                 ui.visuals_mut().widgets.inactive.bg_fill = Color32::TRANSPARENT;
                 ui.visuals_mut().widgets.hovered.bg_fill = Color32::TRANSPARENT;
                 ui.visuals_mut().widgets.active.bg_fill = Color32::TRANSPARENT;
@@ -2299,8 +2706,8 @@ impl CahierApp {
                 ui.visuals_mut().widgets.active.bg_stroke = Stroke::NONE;
                 ui.visuals_mut().widgets.open.bg_stroke = Stroke::NONE;
                 let te = TextEdit::singleline(&mut self.rename_buf)
-                    .font(self.look.serif(17.0))
-                    .text_color(paper)
+                    .font(self.look.serif(15.0))
+                    .text_color(self.look.fg)
                     .desired_width(title_rect.width())
                     .frame(false)
                     .margin(Margin::ZERO)
@@ -2352,8 +2759,8 @@ impl CahierApp {
                 title_rect.center(),
                 Align2::CENTER_CENTER,
                 title,
-                self.look.serif(17.0),
-                paper,
+                self.look.serif(15.0),
+                self.look.fg,
             );
             if !self.shelf_trash {
                 let title_resp = ui.interact(title_rect, id.with("title"), Sense::click());
@@ -2374,56 +2781,6 @@ impl CahierApp {
             logo_resp
                 .on_hover_cursor(CursorIcon::PointingHand)
                 .on_hover_text("Icon");
-        }
-
-        let show_icons = e > 0.08 && !renaming && !self.shelf_trash;
-        if show_icons {
-            let trash_col = self
-                .look
-                .inks
-                .get(2)
-                .copied()
-                .unwrap_or(Color32::from_rgb(0xe2, 0x4b, 0x4a));
-            let a = (40.0 + 215.0 * e).clamp(0.0, 255.0) as u8;
-            let ink = Color32::from_rgba_unmultiplied(
-                self.look.fg.r(),
-                self.look.fg.g(),
-                self.look.fg.b(),
-                a,
-            );
-            let trash =
-                Color32::from_rgba_unmultiplied(trash_col.r(), trash_col.g(), trash_col.b(), a);
-            let pin_col = if meta.pinned {
-                Color32::from_rgba_unmultiplied(
-                    self.look.accent.r(),
-                    self.look.accent.g(),
-                    self.look.accent.b(),
-                    a,
-                )
-            } else {
-                ink
-            };
-            let icon = 26.0;
-            let gap = 22.0;
-            let strip = 2.0 * icon + gap;
-            let origin = pos2(face.center().x - strip * 0.5, face.max.y + 4.0);
-            let pin_r = Rect::from_min_size(origin, vec2(icon, icon));
-            let del_r = Rect::from_min_size(origin + vec2(icon + gap, 0.0), vec2(icon, icon));
-
-            if self
-                .dos_icon(ui, &painter, id.with("pin"), pin_r, pin_col, paint_pin)
-                .on_hover_text(if meta.pinned { "Unpin" } else { "Pin" })
-                .clicked()
-            {
-                act = Some(DosAct::Pin);
-            }
-            if self
-                .dos_icon(ui, &painter, id.with("del"), del_r, trash, paint_bin)
-                .on_hover_text("Corbeille")
-                .clicked()
-            {
-                act = Some(DosAct::Del);
-            }
         }
 
         let mut menu_act = None;
@@ -2481,13 +2838,21 @@ impl CahierApp {
             act = menu_act;
         }
 
+        if act.is_none() && !renaming && resp.long_touched() {
+            act = Some(DosAct::Select);
+        }
         if act.is_none() && !renaming {
             let on_title = pointer.is_some_and(|p| title_rect.contains(p));
             let on_logo = pointer.is_some_and(|p| logo_r.contains(p));
             let mods = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
             if resp.double_clicked() && !on_title && !on_logo && !self.shelf_trash {
                 act = Some(DosAct::Open);
-            } else if resp.clicked() && !on_title && !on_logo {
+            } else if resp.clicked()
+                && !on_title
+                && !on_logo
+                && !self.shelf_band_armed
+                && !self.shelf_haul_armed
+            {
                 act = Some(if mods.0 {
                     DosAct::Toggle
                 } else if mods.1 {
@@ -2501,26 +2866,6 @@ impl CahierApp {
             resp.clone().on_hover_cursor(CursorIcon::PointingHand);
         }
         act
-    }
-
-    fn dos_icon(
-        &self,
-        ui: &mut Ui,
-        painter: &Painter,
-        id: Id,
-        rect: Rect,
-        fg: Color32,
-        paint: impl FnOnce(&Painter, Pos2, Color32),
-    ) -> Response {
-        let resp = ui.interact(rect, id, Sense::click());
-        let c = rect.center();
-        let col = if resp.hovered() {
-            Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), fg.a().max(220))
-        } else {
-            fg
-        };
-        paint(painter, c, col);
-        resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
     fn objet_btn(&self, ui: &mut Ui, label: &str, accent: bool) -> bool {
@@ -4256,63 +4601,6 @@ fn mix_col(a: Color32, b: Color32, t: f32) -> Color32 {
         (a.b() as f32 + (b.b() as f32 - a.b() as f32) * t) as u8,
         (a.a() as f32 + (b.a() as f32 - a.a() as f32) * t) as u8,
     )
-}
-
-fn paint_pin(p: &egui::Painter, c: Pos2, fg: Color32) {
-    // Thumbtack seen from the side, slightly tilted — outline only.
-    let ang = -0.42_f32;
-    let (s, co) = (ang.sin(), ang.cos());
-    let xf = |dx: f32, dy: f32| pos2(c.x + dx * co - dy * s, c.y + dx * s + dy * co);
-    let wire = Stroke::new(1.55_f32, fg);
-    let head = xf(0.0, -5.4);
-    p.circle_stroke(head, 3.4, wire);
-    p.line_segment([xf(-3.1, -2.2), xf(3.1, -2.2)], Stroke::new(1.7_f32, fg));
-    p.line_segment([xf(0.0, -1.6), xf(0.0, 7.6)], Stroke::new(1.35_f32, fg));
-}
-
-fn paint_bin(p: &egui::Painter, c: Pos2, fg: Color32) {
-    let wire = Stroke::new(1.45_f32, fg);
-    let lid = Stroke::new(1.7_f32, fg);
-    // Handle
-    p.line_segment(
-        [pos2(c.x - 2.4, c.y - 7.6), pos2(c.x - 2.4, c.y - 6.0)],
-        wire,
-    );
-    p.line_segment(
-        [pos2(c.x - 2.4, c.y - 7.6), pos2(c.x + 2.4, c.y - 7.6)],
-        wire,
-    );
-    p.line_segment(
-        [pos2(c.x + 2.4, c.y - 7.6), pos2(c.x + 2.4, c.y - 6.0)],
-        wire,
-    );
-    // Lid
-    p.line_segment(
-        [pos2(c.x - 6.8, c.y - 4.8), pos2(c.x + 6.8, c.y - 4.8)],
-        lid,
-    );
-    // Basket, open inside
-    p.line_segment(
-        [pos2(c.x - 5.6, c.y - 4.8), pos2(c.x - 4.1, c.y + 7.2)],
-        wire,
-    );
-    p.line_segment(
-        [pos2(c.x + 5.6, c.y - 4.8), pos2(c.x + 4.1, c.y + 7.2)],
-        wire,
-    );
-    p.line_segment(
-        [pos2(c.x - 4.1, c.y + 7.2), pos2(c.x + 4.1, c.y + 7.2)],
-        wire,
-    );
-    let rib = Stroke::new(1.15_f32, fg);
-    p.line_segment(
-        [pos2(c.x - 1.7, c.y - 2.4), pos2(c.x - 1.15, c.y + 5.4)],
-        rib,
-    );
-    p.line_segment(
-        [pos2(c.x + 1.7, c.y - 2.4), pos2(c.x + 1.15, c.y + 5.4)],
-        rib,
-    );
 }
 
 fn paint_plus(p: &egui::Painter, c: Pos2, fg: Color32) {
