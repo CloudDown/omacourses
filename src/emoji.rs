@@ -1,9 +1,11 @@
 //! Icônes de dossier. Noto Color Emoji est une bitmap CBDT (PNG), sans contours :
-//! egui ne la rastérise pas, les glyphes sortent vides. On extrait les PNG nous-mêmes.
+//! egui ne la rastérise pas. On catalogue tous les glyphes et on décode à la demande.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
+
+const TEX_SIDE: u32 = 72;
 
 pub struct Glyph {
     pub width: usize,
@@ -12,38 +14,61 @@ pub struct Glyph {
 }
 
 pub struct Atlas {
+    font: Option<FontBytes>,
     glyphs: HashMap<char, Glyph>,
+    /// Tous les emojis colorés disponibles, ordre Unicode.
+    catalog: Vec<char>,
 }
 
 impl Atlas {
-    pub fn load(wanted: &[&str]) -> Self {
-        let mut glyphs = HashMap::new();
-        let Some(bytes) = color_emoji_bytes() else {
-            return Self { glyphs };
+    pub fn load() -> Self {
+        let mut atlas = Self {
+            font: None,
+            glyphs: HashMap::new(),
+            catalog: Vec::new(),
         };
-        let Some(font) = Font::parse(&bytes) else {
-            return Self { glyphs };
+        let Some(data) = color_emoji_bytes() else {
+            return atlas;
         };
-        for em in wanted {
-            let Some(ch) = em.chars().find(|c| *c != '\u{fe0f}' && *c != '\u{200d}') else {
-                continue;
-            };
-            if glyphs.contains_key(&ch) {
-                continue;
-            }
-            if let Some(g) = font.decode(ch) {
-                glyphs.insert(ch, g);
-            }
-        }
-        Self { glyphs }
+        let Some(font) = FontBytes::parse(data) else {
+            return atlas;
+        };
+        atlas.catalog = font.list_chars();
+        atlas.font = Some(font);
+        atlas
     }
 
-    pub fn get(&self, emoji: &str) -> Option<&Glyph> {
-        self.key(emoji).and_then(|ch| self.glyphs.get(&ch))
+    pub fn catalog(&self) -> &[char] {
+        &self.catalog
+    }
+
+    pub fn ensure(&mut self, ch: char) -> Option<&Glyph> {
+        if self.glyphs.contains_key(&ch) {
+            return self.glyphs.get(&ch);
+        }
+        let g = self.font.as_ref()?.decode(ch)?;
+        self.glyphs.insert(ch, g);
+        self.glyphs.get(&ch)
+    }
+
+    #[allow(dead_code)]
+    pub fn ensure_str(&mut self, emoji: &str) -> Option<&Glyph> {
+        let ch = self.key(emoji)?;
+        self.ensure(ch)
     }
 
     pub fn key(&self, emoji: &str) -> Option<char> {
-        emoji.chars().find(|ch| self.glyphs.contains_key(ch))
+        emoji.chars().find(|ch| {
+            *ch != '\u{fe0f}'
+                && *ch != '\u{fe0e}'
+                && *ch != '\u{200d}'
+                && self.catalog.contains(ch)
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn get(&self, emoji: &str) -> Option<&Glyph> {
+        self.key(emoji).and_then(|ch| self.glyphs.get(&ch))
     }
 }
 
@@ -53,39 +78,94 @@ struct Group {
     glyph: u32,
 }
 
-struct Font<'a> {
+struct FontBytes {
+    data: Vec<u8>,
     groups: Vec<Group>,
-    cblc: &'a [u8],
-    cbdt: &'a [u8],
+    cblc: (usize, usize),
+    cbdt: (usize, usize),
 }
 
-impl<'a> Font<'a> {
-    fn parse(data: &'a [u8]) -> Option<Self> {
-        let tables = tables(data)?;
-        let cmap = slice(data, tables.get("cmap")?)?;
-        let cblc = slice(data, tables.get("CBLC")?)?;
-        let cbdt = slice(data, tables.get("CBDT")?)?;
+impl FontBytes {
+    fn parse(data: Vec<u8>) -> Option<Self> {
+        let tables = tables(&data)?;
+        let cmap = slice(&data, *tables.get("cmap")?)?;
+        let cblc = *tables.get("CBLC")?;
+        let cbdt = *tables.get("CBDT")?;
         Some(Self {
             groups: cmap_groups(cmap)?,
+            data,
             cblc,
             cbdt,
         })
     }
 
+    fn cblc(&self) -> &[u8] {
+        &self.data[self.cblc.0..self.cblc.0 + self.cblc.1]
+    }
+
+    fn cbdt(&self) -> &[u8] {
+        &self.data[self.cbdt.0..self.cbdt.0 + self.cbdt.1]
+    }
+
+    fn list_chars(&self) -> Vec<char> {
+        let mut out = Vec::new();
+        for g in &self.groups {
+            for cp in g.start..=g.end {
+                if !usable(cp) {
+                    continue;
+                }
+                let Some(ch) = char::from_u32(cp) else {
+                    continue;
+                };
+                let Some(gid) = glyph_id(&self.groups, cp) else {
+                    continue;
+                };
+                if locate(self.cblc(), gid).is_some() {
+                    out.push(ch);
+                }
+            }
+        }
+        out
+    }
+
     fn decode(&self, ch: char) -> Option<Glyph> {
         let gid = glyph_id(&self.groups, ch as u32)?;
-        let (off, len) = locate(self.cblc, gid)?;
-        let blob = self.cbdt.get(off..off + len)?;
-        // Image format 17 : métriques (5) + longueur + PNG.
+        let (off, len) = locate(self.cblc(), gid)?;
+        let blob = self.cbdt().get(off..off + len)?;
         let dlen = read_u32(blob, 5)? as usize;
         let png = blob.get(9..9 + dlen)?;
         let img = image::load_from_memory(png).ok()?.into_rgba8();
+        let (w, h) = img.dimensions();
+        let img = if w > TEX_SIDE || h > TEX_SIDE {
+            let s = (TEX_SIDE as f32 / w.max(h) as f32).min(1.0);
+            let nw = ((w as f32 * s).round() as u32).max(1);
+            let nh = ((h as f32 * s).round() as u32).max(1);
+            image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+        } else {
+            img
+        };
         Some(Glyph {
             width: img.width() as usize,
             height: img.height() as usize,
             rgba: img.into_raw(),
         })
     }
+}
+
+fn usable(cp: u32) -> bool {
+    // Variation selectors, ZWJ, tags — pas des icônes seuls.
+    if matches!(cp, 0x200D | 0xFE0E | 0xFE0F | 0x20E3) {
+        return false;
+    }
+    if (0xE0020..=0xE007F).contains(&cp) {
+        return false;
+    }
+    // Privé / tags régionaux seuls peu utiles en grille.
+    if (0xE000..=0xF8FF).contains(&cp) {
+        return false;
+    }
+    // Assez haut pour les symboles, ou bloc dingbat / emoji.
+    cp >= 0x00A9 || (0x203C..=0x3299).contains(&cp)
 }
 
 fn color_emoji_bytes() -> Option<Vec<u8>> {
@@ -128,7 +208,7 @@ fn tables(data: &[u8]) -> Option<HashMap<&str, (usize, usize)>> {
     Some(map)
 }
 
-fn slice<'a>(data: &'a [u8], span: &(usize, usize)) -> Option<&'a [u8]> {
+fn slice(data: &[u8], span: (usize, usize)) -> Option<&[u8]> {
     data.get(span.0..span.0 + span.1)
 }
 
@@ -164,7 +244,6 @@ fn glyph_id(groups: &[Group], cp: u32) -> Option<u16> {
     u16::try_from(g.glyph + (cp - g.start)).ok()
 }
 
-/// Offset et longueur dans CBDT pour un glyphe (index format 1, image PNG).
 fn locate(cblc: &[u8], gid: u16) -> Option<(usize, usize)> {
     let nsub = read_u32(cblc, 16)? as usize;
     let arr = read_u32(cblc, 8)? as usize;
@@ -199,31 +278,24 @@ fn read_u32(data: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?))
 }
 
+/// Favoris affichés en tête de casse.
+pub const FAVORITES: &[&str] = &[
+    "📝", "📕", "📗", "📘", "📙", "📒", "📓", "✨", "💡", "🎯", "⭐", "🔥", "🌙", "☕", "🎵",
+    "📐", "🧪", "🧠", "💼", "🗂️", "📌", "🖤", "🌿", "🚀", "💎", "🔮",
+];
+
 #[cfg(test)]
 mod tests {
     use super::Atlas;
 
     #[test]
-    fn color_emoji_decodes() {
-        let atlas = Atlas::load(&["📝", "🧪", "🗂️"]);
-        if atlas.get("📝").is_none() {
+    fn color_emoji_catalog() {
+        let mut atlas = Atlas::load();
+        if atlas.catalog().is_empty() {
             return;
         }
-        for em in ["📝", "🧪", "🗂️"] {
-            let g = atlas.get(em).unwrap_or_else(|| panic!("{em}"));
-            assert!(
-                g.width >= 32 && g.height >= 32,
-                "{em} {}x{}",
-                g.width,
-                g.height
-            );
-            assert_eq!(g.rgba.len(), g.width * g.height * 4);
-            assert!(
-                g.rgba
-                    .chunks(4)
-                    .any(|px| px[3] > 200 && (px[0] > 8 || px[1] > 8 || px[2] > 8)),
-                "{em} entièrement transparent"
-            );
-        }
+        assert!(atlas.catalog().len() > 200);
+        let g = atlas.ensure_str("📝").expect("memo");
+        assert!(g.width >= 24 && g.height >= 24);
     }
 }

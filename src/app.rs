@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::camera::{page_at_y, page_origin, Camera, ZOOM_STOPS};
 use crate::document::{ImageObj, Note, PaperKind, TextBox, PAGE_H, PAGE_SPAN, PAGE_W};
-use crate::emoji::Atlas;
+use crate::emoji::{Atlas, FAVORITES};
 use crate::export::{self, MediaLoader};
 use crate::ink::{
     default_width, draw_ants, erase_area, map_mesh, maybe_snap_shape, mixed_pressure, InkPoint,
@@ -28,11 +28,6 @@ const PAPER_PEEK: f32 = 18.0;
 const TITLE_H: f32 = 26.0;
 const ICON_ROW: f32 = 32.0;
 
-const FOLDER_EMOJIS: &[&str] = &[
-    "📝", "📕", "📗", "📘", "📙", "📒", "📓", "✨", "💡", "🎯", "⭐", "🔥", "🌙", "☕", "🎵", "📐",
-    "🧪", "🧠", "💼", "🗂️", "📌", "🖤", "🌿", "🚀", "💎", "🔮",
-];
-
 #[derive(Clone)]
 enum Scene {
     Shelf { query: String },
@@ -47,6 +42,10 @@ enum DosAct {
     Del,
     Emoji,
     Rename,
+    Select,
+    Toggle,
+    Range,
+    Restore,
 }
 
 struct Toast {
@@ -116,11 +115,18 @@ pub struct CahierApp {
     pen_was_prox: bool,
     /// Sélecteur d’emoji ouvert pour ce note.
     emoji_pick: Option<Uuid>,
+    /// Filtre dans la casse à caractères.
+    emoji_query: String,
     /// Titre de dossier en cours d’édition.
     rename_id: Option<Uuid>,
     rename_buf: String,
     /// Le champ texte vient d’être posé : lui donner le clavier.
     text_focus: bool,
+    /// Sélection style explorateur sur l’étagère.
+    shelf_sel: Vec<Uuid>,
+    shelf_anchor: Option<Uuid>,
+    /// Vue corbeille (sinon étagère active).
+    shelf_trash: bool,
 }
 
 impl CahierApp {
@@ -158,7 +164,7 @@ impl CahierApp {
             dirty: false,
             last_change: Instant::now(),
             textures: HashMap::new(),
-            emoji: Atlas::load(FOLDER_EMOJIS),
+            emoji: Atlas::load(),
             emoji_tex: HashMap::new(),
             pressure: Pressure::start(),
             last_ptr: None,
@@ -177,9 +183,13 @@ impl CahierApp {
             cursor_off: false,
             pen_was_prox: false,
             emoji_pick: None,
+            emoji_query: String::new(),
             rename_id: None,
             rename_buf: String::new(),
             text_focus: false,
+            shelf_sel: Vec::new(),
+            shelf_anchor: None,
+            shelf_trash: false,
         };
         if let Ok(q) = std::env::var("CAHIER_OPEN") {
             let q = q.trim().to_lowercase();
@@ -770,7 +780,17 @@ impl CahierApp {
                         self.close_desk();
                     }
                 }
-                Scene::Shelf { .. } => {}
+                Scene::Shelf { .. } => {
+                    if !self.shelf_sel.is_empty() {
+                        self.shelf_sel.clear();
+                        self.shelf_anchor = None;
+                    } else if self.shelf_trash {
+                        self.shelf_trash = false;
+                    } else if self.emoji_pick.is_some() {
+                        self.emoji_pick = None;
+                        self.emoji_query.clear();
+                    }
+                }
             }
         }
         if let Scene::Desk = self.scene {
@@ -950,6 +970,11 @@ impl CahierApp {
     }
 
     fn ui_shelf(&mut self, ctx: &Context) {
+        // Raccourcis étagère (sélection / corbeille)
+        if self.emoji_pick.is_none() && self.rename_id.is_none() {
+            self.shelf_keys(ctx);
+        }
+
         CentralPanel::default()
             .frame(Frame::NONE.fill(self.look.desk))
             .show(ctx, |ui| {
@@ -966,125 +991,337 @@ impl CahierApp {
                         .inner_margin(Margin::symmetric(18, 11))
                         .show(ui, |ui| {
                             ui.set_width(search_w);
+                            let hint = if self.shelf_trash {
+                                "Search trash"
+                            } else {
+                                "Search"
+                            };
                             let te = TextEdit::singleline(query)
-                                .hint_text("Search")
+                                .hint_text(hint)
                                 .font(self.look.mono(15.0))
                                 .frame(false);
                             ui.add(te);
                         });
                 });
-                ui.add_space(28.0);
+                if self.shelf_trash {
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(78.0);
+                        ui.label(
+                            RichText::new("Corbeille")
+                                .font(self.look.serif(18.0))
+                                .color(self.look.fg_dim),
+                        );
+                        ui.add_space(12.0);
+                        if !self.lib.index.trash.is_empty()
+                            && ui
+                                .add(
+                                    Label::new(
+                                        RichText::new("vider")
+                                            .font(self.look.mono(12.0))
+                                            .color(self.look.inks.get(2).copied().unwrap_or(self.look.accent)),
+                                    )
+                                    .sense(Sense::click()),
+                                )
+                                .on_hover_cursor(CursorIcon::PointingHand)
+                                .clicked()
+                        {
+                            self.lib.empty_trash();
+                            self.shelf_sel.clear();
+                        }
+                    });
+                }
+                ui.add_space(if self.shelf_trash { 12.0 } else { 28.0 });
 
                 let query = match &self.scene {
                     Scene::Shelf { query } => query.to_lowercase(),
                     _ => String::new(),
                 };
-                let notes: Vec<_> = self
-                    .lib
-                    .index
-                    .notes
-                    .iter()
+                let source: Vec<_> = if self.shelf_trash {
+                    self.lib.index.trash.clone()
+                } else {
+                    self.lib.index.notes.clone()
+                };
+                let notes: Vec<_> = source
+                    .into_iter()
                     .filter(|m| query.is_empty() || m.title.to_lowercase().contains(&query))
-                    .cloned()
                     .collect();
+
+                // Clic dans le vide : désélection
+                let bg = ui.interact(
+                    ui.max_rect(),
+                    Id::new("shelf-bg"),
+                    Sense::click(),
+                );
+                if bg.clicked() && !ui.input(|i| i.modifiers.command || i.modifiers.shift) {
+                    // ne clear que si le clic n'est pas sur un dos (les dos prennent le focus après)
+                }
+
                 if notes.is_empty() {
                     ui.add_space(48.0);
                     ui.horizontal(|ui| {
                         ui.add_space(78.0);
+                        let empty = if self.shelf_trash {
+                            "Corbeille vide"
+                        } else {
+                            "No notes yet"
+                        };
                         ui.label(
-                            RichText::new("No notes yet")
+                            RichText::new(empty)
                                 .font(self.look.serif(22.0))
                                 .color(self.look.fg_dim),
                         );
                     });
-                    return;
-                }
+                } else {
+                    let mut open = None;
+                    let mut del = None;
+                    let mut dup = None;
+                    let mut pin = None;
+                    let mut emoji_for = None;
+                    let mut rename_for = None;
+                    let mut restore = None;
+                    let mut select = None;
+                    let mut toggle = None;
+                    let mut range = None;
+                    let ids: Vec<Uuid> = notes.iter().map(|n| n.id).collect();
 
-                let mut open = None;
-                let mut del = None;
-                let mut dup = None;
-                let mut pin = None;
-                let mut emoji_for = None;
-                let mut rename_for = None;
+                    ScrollArea::vertical().show(ui, |ui| {
+                        ui.add_space(4.0);
+                        let available = ui.available_width() - 98.0;
+                        let card_w = DOS_W + DOS_PAD * 2.0;
+                        let gap = 6.0;
+                        let cols = ((available + gap) / (card_w + gap)).floor().max(1.0) as usize;
+                        let mut i = 0;
+                        while i < notes.len() {
+                            ui.horizontal(|ui| {
+                                ui.add_space(78.0);
+                                for _ in 0..cols {
+                                    if i >= notes.len() {
+                                        break;
+                                    }
+                                    let meta = notes[i].clone();
+                                    i += 1;
+                                    let selected = self.shelf_sel.contains(&meta.id);
+                                    match self.cahier_dos(ui, &meta, selected) {
+                                        Some(DosAct::Open) => open = Some(meta.id),
+                                        Some(DosAct::Dup) => dup = Some(meta.id),
+                                        Some(DosAct::Pin) => pin = Some(meta.id),
+                                        Some(DosAct::Del) => del = Some(meta.id),
+                                        Some(DosAct::Emoji) => emoji_for = Some(meta.id),
+                                        Some(DosAct::Rename) => rename_for = Some(meta.id),
+                                        Some(DosAct::Restore) => restore = Some(meta.id),
+                                        Some(DosAct::Select) => select = Some(meta.id),
+                                        Some(DosAct::Toggle) => toggle = Some(meta.id),
+                                        Some(DosAct::Range) => range = Some(meta.id),
+                                        None => {}
+                                    }
+                                    ui.add_space(gap);
+                                }
+                            });
+                            ui.add_space(8.0);
+                        }
+                    });
 
-                ScrollArea::vertical().show(ui, |ui| {
-                    ui.add_space(4.0);
-                    let available = ui.available_width() - 98.0;
-                    let card_w = DOS_W + DOS_PAD * 2.0;
-                    let gap = 6.0;
-                    let cols = ((available + gap) / (card_w + gap)).floor().max(1.0) as usize;
-                    let mut i = 0;
-                    while i < notes.len() {
-                        ui.horizontal(|ui| {
-                            ui.add_space(78.0);
-                            for _ in 0..cols {
-                                if i >= notes.len() {
-                                    break;
-                                }
-                                let meta = notes[i].clone();
-                                i += 1;
-                                match self.cahier_dos(ui, &meta) {
-                                    Some(DosAct::Open) => open = Some(meta.id),
-                                    Some(DosAct::Dup) => dup = Some(meta.id),
-                                    Some(DosAct::Pin) => pin = Some(meta.id),
-                                    Some(DosAct::Del) => del = Some(meta.id),
-                                    Some(DosAct::Emoji) => emoji_for = Some(meta.id),
-                                    Some(DosAct::Rename) => rename_for = Some(meta.id),
-                                    None => {}
-                                }
-                                ui.add_space(gap);
+                    if let Some(id) = select {
+                        self.shelf_sel = vec![id];
+                        self.shelf_anchor = Some(id);
+                    }
+                    if let Some(id) = toggle {
+                        if let Some(p) = self.shelf_sel.iter().position(|x| *x == id) {
+                            self.shelf_sel.remove(p);
+                        } else {
+                            self.shelf_sel.push(id);
+                        }
+                        self.shelf_anchor = Some(id);
+                    }
+                    if let Some(id) = range {
+                        let anchor = self.shelf_anchor.or_else(|| self.shelf_sel.last().copied());
+                        if let Some(a) = anchor {
+                            if let (Some(ia), Some(ib)) = (
+                                ids.iter().position(|x| *x == a),
+                                ids.iter().position(|x| *x == id),
+                            ) {
+                                let (lo, hi) = if ia <= ib { (ia, ib) } else { (ib, ia) };
+                                self.shelf_sel = ids[lo..=hi].to_vec();
                             }
-                        });
-                        ui.add_space(8.0);
+                        } else {
+                            self.shelf_sel = vec![id];
+                            self.shelf_anchor = Some(id);
+                        }
                     }
-                });
-
-                if let Some(id) = emoji_for {
-                    self.emoji_pick = Some(id);
-                    self.rename_id = None;
-                }
-                if let Some(id) = rename_for {
-                    if let Some(m) = self.lib.index.notes.iter().find(|n| n.id == id) {
-                        self.rename_buf = m.title.clone();
-                    }
-                    self.rename_id = Some(id);
-                    self.emoji_pick = None;
-                }
-                if let Some(id) = open {
-                    self.emoji_pick = None;
-                    self.rename_id = None;
-                    self.open_note(id);
-                }
-                if let Some(id) = dup {
-                    if let Some(n) = self.lib.duplicate(id) {
-                        let nid = n.id;
-                        self.open_note(nid);
-                    }
-                }
-                if let Some(id) = pin {
-                    if let Some(mut n) = self.lib.load_note(id) {
-                        n.pinned = !n.pinned;
-                        self.lib.save_note(&n);
-                    }
-                }
-                if let Some(id) = del {
-                    self.lib.delete_note(id);
-                    if self.rename_id == Some(id) {
+                    if let Some(id) = emoji_for {
+                        self.emoji_pick = Some(id);
                         self.rename_id = None;
+                    }
+                    if let Some(id) = rename_for {
+                        if let Some(m) = self.lib.index.notes.iter().find(|n| n.id == id) {
+                            self.rename_buf = m.title.clone();
+                        }
+                        self.rename_id = Some(id);
+                        self.emoji_pick = None;
+                    }
+                    if let Some(id) = open {
+                        if !self.shelf_trash {
+                            self.emoji_pick = None;
+                            self.rename_id = None;
+                            self.shelf_sel.clear();
+                            self.open_note(id);
+                        }
+                    }
+                    if let Some(id) = dup {
+                        if let Some(n) = self.lib.duplicate(id) {
+                            let nid = n.id;
+                            self.open_note(nid);
+                        }
+                    }
+                    if let Some(id) = pin {
+                        if let Some(mut n) = self.lib.load_note(id) {
+                            n.pinned = !n.pinned;
+                            self.lib.save_note(&n);
+                        }
+                    }
+                    if let Some(id) = restore {
+                        self.lib.restore_note(id);
+                        self.shelf_sel.retain(|x| *x != id);
+                    }
+                    if let Some(id) = del {
+                        if self.shelf_trash {
+                            self.lib.purge_trashed(id);
+                        } else {
+                            self.lib.trash_note(id);
+                        }
+                        self.shelf_sel.retain(|x| *x != id);
+                        if self.rename_id == Some(id) {
+                            self.rename_id = None;
+                        }
                     }
                 }
             });
+
+        // Corbeille — bas gauche, face à l'encrier
+        Area::new(Id::new("fab-corbeille"))
+            .anchor(Align2::LEFT_BOTTOM, vec2(28.0, -28.0))
+            .show(ctx, |ui| {
+                let n = self.lib.index.trash.len();
+                if self
+                    .wastebasket(ui, self.shelf_trash, n)
+                    .on_hover_text(if self.shelf_trash {
+                        "Étagère"
+                    } else if n == 0 {
+                        "Corbeille"
+                    } else {
+                        "Corbeille"
+                    })
+                    .clicked()
+                {
+                    self.shelf_trash = !self.shelf_trash;
+                    self.shelf_sel.clear();
+                    self.shelf_anchor = None;
+                    if let Scene::Shelf { query } = &mut self.scene {
+                        query.clear();
+                    }
+                }
+            });
+
         Area::new(Id::new("fab-nouveau"))
             .anchor(Align2::RIGHT_BOTTOM, vec2(-28.0, -28.0))
             .show(ctx, |ui| {
-                if self.inkwell(ui).on_hover_text("New  ·  N").clicked() {
+                if !self.shelf_trash
+                    && self.inkwell(ui).on_hover_text("New  ·  N").clicked()
+                {
                     self.new_note();
                 }
             });
 
+        // Barre d'actions si sélection
+        if !self.shelf_sel.is_empty() && self.emoji_pick.is_none() {
+            let n = self.shelf_sel.len();
+            Area::new(Id::new("shelf-sel-bar"))
+                .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -28.0))
+                .order(Order::Foreground)
+                .show(ctx, |ui| {
+                    Frame::NONE
+                        .fill(self.look.desk_deep)
+                        .stroke(Stroke::new(1.0_f32, self.look.desk_edge))
+                        .corner_radius(18)
+                        .inner_margin(Margin::symmetric(16, 10))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!("{n} sélectionné{}", if n > 1 { "s" } else { "" }))
+                                        .font(self.look.mono(12.0))
+                                        .color(self.look.fg),
+                                );
+                                ui.add_space(14.0);
+                                if self.shelf_trash {
+                                    if ui
+                                        .add(
+                                            Label::new(
+                                                RichText::new("restaurer")
+                                                    .font(self.look.mono(12.0))
+                                                    .color(self.look.accent),
+                                            )
+                                            .sense(Sense::click()),
+                                        )
+                                        .clicked()
+                                    {
+                                        for id in self.shelf_sel.clone() {
+                                            self.lib.restore_note(id);
+                                        }
+                                        self.shelf_sel.clear();
+                                    }
+                                    ui.add_space(10.0);
+                                    if ui
+                                        .add(
+                                            Label::new(
+                                                RichText::new("supprimer")
+                                                    .font(self.look.mono(12.0))
+                                                    .color(
+                                                        self.look
+                                                            .inks
+                                                            .get(2)
+                                                            .copied()
+                                                            .unwrap_or(self.look.accent),
+                                                    ),
+                                            )
+                                            .sense(Sense::click()),
+                                        )
+                                        .clicked()
+                                    {
+                                        for id in self.shelf_sel.clone() {
+                                            self.lib.purge_trashed(id);
+                                        }
+                                        self.shelf_sel.clear();
+                                    }
+                                } else if ui
+                                    .add(
+                                        Label::new(
+                                            RichText::new("corbeille")
+                                                .font(self.look.mono(12.0))
+                                                .color(
+                                                    self.look
+                                                        .inks
+                                                        .get(2)
+                                                        .copied()
+                                                        .unwrap_or(self.look.accent),
+                                                ),
+                                        )
+                                        .sense(Sense::click()),
+                                    )
+                                    .clicked()
+                                {
+                                    for id in self.shelf_sel.clone() {
+                                        self.lib.trash_note(id);
+                                    }
+                                    self.shelf_sel.clear();
+                                }
+                            });
+                        });
+                });
+        }
+
         let fiche_ouverte = !self.lib.index.fiche_pliee;
-        // La fiche sort sous le signet : la queue du ruban reste prise dans la page.
-        if fiche_ouverte {
+        if fiche_ouverte && !self.shelf_trash {
             Area::new(Id::new("shelf-tuto-fiche"))
                 .anchor(Align2::LEFT_TOP, vec2(16.0, 46.0))
                 .order(Order::Foreground)
@@ -1108,6 +1345,132 @@ impl CahierApp {
         if let Some(id) = self.emoji_pick {
             self.ui_emoji_picker(ctx, id);
         }
+    }
+
+    fn shelf_keys(&mut self, ctx: &Context) {
+        let typing = ctx.wants_keyboard_input();
+        let mut clear = false;
+        let mut trash_sel = false;
+        let mut select_all = false;
+        let mut open_one = false;
+        ctx.input(|i| {
+            if i.key_pressed(Key::Escape) {
+                clear = true;
+            }
+            if !typing && i.modifiers.command && i.key_pressed(Key::A) {
+                select_all = true;
+            }
+            if !typing && (i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) {
+                trash_sel = true;
+            }
+            if !typing && i.key_pressed(Key::Enter) && self.shelf_sel.len() == 1 {
+                open_one = true;
+            }
+        });
+        if clear {
+            if !self.shelf_sel.is_empty() {
+                self.shelf_sel.clear();
+                self.shelf_anchor = None;
+            } else if self.shelf_trash {
+                self.shelf_trash = false;
+            }
+        }
+        if select_all {
+            let src = if self.shelf_trash {
+                &self.lib.index.trash
+            } else {
+                &self.lib.index.notes
+            };
+            self.shelf_sel = src.iter().map(|m| m.id).collect();
+        }
+        if trash_sel && !self.shelf_sel.is_empty() {
+            let ids = self.shelf_sel.clone();
+            if self.shelf_trash {
+                for id in ids {
+                    self.lib.purge_trashed(id);
+                }
+            } else {
+                for id in ids {
+                    self.lib.trash_note(id);
+                }
+            }
+            self.shelf_sel.clear();
+        }
+        if open_one && !self.shelf_trash {
+            if let Some(id) = self.shelf_sel.first().copied() {
+                self.shelf_sel.clear();
+                self.open_note(id);
+            }
+        }
+    }
+
+    fn wastebasket(&self, ui: &mut Ui, open: bool, count: usize) -> Response {
+        let size = 56.0;
+        let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+        let p = ui.painter();
+        let c = rect.center();
+        let well = if open || resp.hovered() {
+            self.look.desk_edge
+        } else {
+            self.look.desk_deep
+        };
+        p.circle_filled(c, 25.0, well);
+        p.circle_stroke(
+            c,
+            25.0,
+            Stroke::new(1.2_f32, self.look.muted.gamma_multiply(0.7)),
+        );
+        // Panier fil de fer
+        let ink = if open {
+            self.look.accent
+        } else {
+            self.look.paper.gamma_multiply(0.75)
+        };
+        let top = c + vec2(0.0, -8.0);
+        let bot = c + vec2(0.0, 10.0);
+        let w_top = 11.0;
+        let w_bot = 8.0;
+        p.line_segment(
+            [top + vec2(-w_top, 0.0), top + vec2(w_top, 0.0)],
+            Stroke::new(1.4_f32, ink),
+        );
+        p.line_segment(
+            [top + vec2(-w_top, 0.0), bot + vec2(-w_bot, 0.0)],
+            Stroke::new(1.3_f32, ink),
+        );
+        p.line_segment(
+            [top + vec2(w_top, 0.0), bot + vec2(w_bot, 0.0)],
+            Stroke::new(1.3_f32, ink),
+        );
+        p.line_segment(
+            [bot + vec2(-w_bot, 0.0), bot + vec2(w_bot, 0.0)],
+            Stroke::new(1.3_f32, ink),
+        );
+        for t in [0.35_f32, 0.65] {
+            let y = top.y + (bot.y - top.y) * t;
+            let w = w_top + (w_bot - w_top) * t;
+            p.line_segment(
+                [pos2(c.x - w, y), pos2(c.x + w, y)],
+                Stroke::new(1.0_f32, ink.gamma_multiply(0.7)),
+            );
+        }
+        // Anse
+        p.circle_stroke(top + vec2(0.0, -3.5), 4.0, Stroke::new(1.2_f32, ink));
+        if count > 0 && !open {
+            p.circle_filled(c + vec2(12.0, -12.0), 5.5, self.look.accent);
+            p.text(
+                c + vec2(12.0, -12.0),
+                Align2::CENTER_CENTER,
+                if count > 9 {
+                    "9+".to_string()
+                } else {
+                    count.to_string()
+                },
+                self.look.mono(9.0),
+                self.look.desk_deep,
+            );
+        }
+        resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
     /// Signet de la fiche : papier, cran en V, astérisque de marge.
@@ -1410,7 +1773,7 @@ impl CahierApp {
             return false;
         };
         if !self.emoji_tex.contains_key(&ch) {
-            let img = if let Some(g) = self.emoji.get(emoji) {
+            let img = if let Some(g) = self.emoji.ensure(ch) {
                 ColorImage::from_rgba_unmultiplied([g.width, g.height], &g.rgba)
             } else {
                 return false;
@@ -1435,81 +1798,255 @@ impl CahierApp {
         true
     }
 
+    /// Casse à caractères : tiroirs de marques pour le dos.
     fn ui_emoji_picker(&mut self, ctx: &Context, note_id: Uuid) {
         let mut chosen: Option<String> = None;
         let mut dismiss = false;
+        let screen = ctx.screen_rect();
+        let drawer_w = (screen.width() * 0.72).clamp(420.0, 760.0);
+        let drawer_h = (screen.height() * 0.78).clamp(420.0, 640.0);
+
+        // Fond de pupitre assombri
+        Area::new(Id::new("emoji-dim"))
+            .fixed_pos(screen.min)
+            .order(Order::Foreground)
+            .interactable(true)
+            .show(ctx, |ui| {
+                let (r, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
+                ui.painter().rect_filled(
+                    r,
+                    CornerRadius::ZERO,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 120),
+                );
+                if resp.clicked() {
+                    dismiss = true;
+                }
+            });
+
         Area::new(Id::new("emoji-pick").with(note_id))
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .order(Order::Foreground)
             .show(ctx, |ui| {
+                let wood = mix_col(self.look.desk_deep, self.look.accent, 0.06);
+                let wood_edge = mix_col(self.look.ink, self.look.desk_edge, 0.35);
+                let paper = mix_col(self.look.paper, self.look.accent, 0.03);
+                let ink = self.look.ink;
+
                 Frame::NONE
-                    .fill(self.look.paper)
-                    .stroke(Stroke::new(1.0_f32, self.look.ink.gamma_multiply(0.14)))
-                    .corner_radius(16)
-                    .inner_margin(Margin::symmetric(16, 14))
+                    .fill(wood)
+                    .stroke(Stroke::new(1.2_f32, wood_edge.gamma_multiply(0.55)))
+                    .corner_radius(6)
+                    .inner_margin(Margin::symmetric(14, 12))
+                    .shadow(egui::Shadow {
+                        offset: [0, 10],
+                        blur: 28,
+                        spread: 0,
+                        color: self.look.shadow.gamma_multiply(0.7),
+                    })
                     .show(ui, |ui| {
-                        ui.set_max_width(320.0);
-                        ui.label(
-                            RichText::new("Icon")
-                                .font(self.look.serif(18.0))
-                                .color(self.look.ink),
+                        ui.set_width(drawer_w);
+                        ui.set_max_height(drawer_h);
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Marque")
+                                    .font(self.look.serif(26.0))
+                                    .color(paper),
+                            );
+                            ui.add_space(10.0);
+                            ui.label(
+                                RichText::new("casse à caractères")
+                                    .font(self.look.mono(11.0))
+                                    .color(paper.gamma_multiply(0.45)),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui
+                                    .add(
+                                        Label::new(
+                                            RichText::new("fermer")
+                                                .font(self.look.mono(12.0))
+                                                .color(paper.gamma_multiply(0.55)),
+                                        )
+                                        .sense(Sense::click()),
+                                    )
+                                    .clicked()
+                                {
+                                    dismiss = true;
+                                }
+                            });
+                        });
+                        ui.add_space(6.0);
+                        ui.painter().hline(
+                            ui.max_rect().x_range(),
+                            ui.cursor().top(),
+                            Stroke::new(1.0_f32, paper.gamma_multiply(0.18)),
                         );
                         ui.add_space(10.0);
+
+                        // Favoris — rangée de tampons
+                        ui.label(
+                            RichText::new("fréquents")
+                                .font(self.look.mono(10.0))
+                                .color(paper.gamma_multiply(0.4)),
+                        );
+                        ui.add_space(4.0);
                         ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-                            for em in FOLDER_EMOJIS {
-                                let (rect, resp) =
-                                    ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
-                                let p = ui.painter();
-                                if resp.hovered() {
-                                    p.rect_filled(
-                                        rect,
-                                        CornerRadius::same(10),
-                                        self.look.accent.gamma_multiply(0.22),
-                                    );
-                                }
-                                self.paint_emoji(ctx, &p, rect.shrink(3.0), em);
-                                if resp.clicked() {
-                                    chosen = Some((*em).to_string());
+                            ui.spacing_mut().item_spacing = vec2(5.0, 5.0);
+                            for em in FAVORITES {
+                                if self.casse_cell(ui, ctx, paper, ink, em, &mut chosen) {
+                                    // chosen set inside
                                 }
                             }
-                            let (rect, resp) =
-                                ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
-                            let p = ui.painter();
-                            if resp.hovered() {
-                                p.rect_filled(
-                                    rect,
-                                    CornerRadius::same(10),
-                                    self.look.ink.gamma_multiply(0.08),
-                                );
-                            }
-                            p.text(
-                                rect.center(),
-                                Align2::CENTER_CENTER,
-                                "×",
-                                self.look.mono(16.0),
-                                self.look.ink.gamma_multiply(0.55),
-                            );
-                            if resp.clicked() {
+                            if self.casse_clear(ui, paper, ink) {
                                 chosen = Some(String::new());
                             }
                         });
+                        ui.add_space(12.0);
+
+                        // Filtre : coller ou taper un caractère
+                        Frame::NONE
+                            .fill(paper.gamma_multiply(0.12))
+                            .corner_radius(4)
+                            .inner_margin(Margin::symmetric(10, 6))
+                            .show(ui, |ui| {
+                                let te = TextEdit::singleline(&mut self.emoji_query)
+                                    .hint_text("coller un emoji · filtrer")
+                                    .font(self.look.mono(13.0))
+                                    .text_color(paper)
+                                    .frame(false);
+                                ui.add(te.desired_width(ui.available_width()));
+                            });
                         ui.add_space(8.0);
-                        if ui
-                            .add(
-                                Label::new(
-                                    RichText::new("Dismiss")
+
+                        let q = self.emoji_query.clone();
+                        let q = q.trim().to_string();
+                        // Si la requête est exactement un emoji, proposer de valider
+                        if !q.is_empty() && self.emoji.key(&q).is_some() && q.chars().count() <= 4 {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("utiliser")
                                         .font(self.look.mono(11.0))
-                                        .color(self.look.ink.gamma_multiply(0.45)),
-                                )
-                                .sense(Sense::click()),
-                            )
-                            .clicked()
-                        {
-                            dismiss = true;
+                                        .color(paper.gamma_multiply(0.5)),
+                                );
+                                if self.casse_cell(ui, ctx, paper, ink, &q, &mut chosen) {
+                                    // ok
+                                }
+                            });
+                            ui.add_space(6.0);
                         }
+
+                        let catalog: Vec<char> = {
+                            let all = self.emoji.catalog();
+                            if q.is_empty() {
+                                all.to_vec()
+                            } else if q.chars().any(|c| self.emoji.catalog().contains(&c)) {
+                                all.iter()
+                                    .copied()
+                                    .filter(|ch| q.contains(*ch))
+                                    .collect()
+                            } else {
+                                // Texte libre : on garde toute la casse (le filtre emoji est coller).
+                                all.to_vec()
+                            }
+                        };
+
+                        ui.label(
+                            RichText::new(format!("toute la casse · {}", catalog.len()))
+                                .font(self.look.mono(10.0))
+                                .color(paper.gamma_multiply(0.4)),
+                        );
+                        ui.add_space(4.0);
+
+                        let cell = 38.0;
+                        let gap = 3.0;
+                        let cols = ((drawer_w - 28.0) / (cell + gap)).floor().max(6.0) as usize;
+                        let rows_vis = 9;
+                        ScrollArea::vertical()
+                            .max_height(cell * rows_vis as f32 + gap * (rows_vis as f32 - 1.0))
+                            .show(ui, |ui| {
+                                Frame::NONE
+                                    .fill(paper)
+                                    .stroke(Stroke::new(1.0_f32, ink.gamma_multiply(0.12)))
+                                    .corner_radius(3)
+                                    .inner_margin(Margin::same(8))
+                                    .show(ui, |ui| {
+                                        ui.spacing_mut().item_spacing = vec2(gap, gap);
+                                        let mut i = 0;
+                                        while i < catalog.len() {
+                                            ui.horizontal(|ui| {
+                                                for _ in 0..cols {
+                                                    if i >= catalog.len() {
+                                                        break;
+                                                    }
+                                                    let ch = catalog[i];
+                                                    i += 1;
+                                                    let em = ch.to_string();
+                                                    let (rect, resp) = ui.allocate_exact_size(
+                                                        vec2(cell, cell),
+                                                        Sense::click(),
+                                                    );
+                                                    let p = ui.painter();
+                                                    // Compartiment
+                                                    p.rect_stroke(
+                                                        rect,
+                                                        CornerRadius::same(2),
+                                                        Stroke::new(
+                                                            0.7_f32,
+                                                            ink.gamma_multiply(0.10),
+                                                        ),
+                                                        StrokeKind::Inside,
+                                                    );
+                                                    if resp.hovered() {
+                                                        p.rect_filled(
+                                                            rect.shrink(1.0),
+                                                            CornerRadius::same(2),
+                                                            self.look.accent.gamma_multiply(0.18),
+                                                        );
+                                                    }
+                                                    self.paint_emoji(
+                                                        ctx,
+                                                        &p,
+                                                        rect.shrink(4.0),
+                                                        &em,
+                                                    );
+                                                    if resp.clicked() {
+                                                        chosen = Some(em);
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    });
+                            });
+
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("esc · clic hors de la casse")
+                                .font(self.look.mono(10.0))
+                                .color(paper.gamma_multiply(0.35)),
+                        );
                     });
             });
+
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            dismiss = true;
+        }
+        // Coller depuis le presse-papiers
+        if ctx.input(|i| i.events.iter().any(|e| matches!(e, Event::Paste(_)))) {
+            if let Some(s) = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    Event::Paste(t) => Some(t.clone()),
+                    _ => None,
+                })
+            }) {
+                let t = s.trim().to_string();
+                if self.emoji.key(&t).is_some() {
+                    chosen = Some(t);
+                } else {
+                    self.emoji_query = t;
+                }
+            }
+        }
+
         if let Some(em) = chosen {
             if let Some(mut n) = self.lib.load_note(note_id) {
                 n.emoji = em;
@@ -1517,12 +2054,74 @@ impl CahierApp {
                 self.lib.save_note(&n);
             }
             self.emoji_pick = None;
+            self.emoji_query.clear();
         } else if dismiss {
             self.emoji_pick = None;
+            self.emoji_query.clear();
         }
     }
 
-    fn cahier_dos(&mut self, ui: &mut Ui, meta: &crate::library::NoteMeta) -> Option<DosAct> {
+    fn casse_cell(
+        &mut self,
+        ui: &mut Ui,
+        ctx: &Context,
+        paper: Color32,
+        ink: Color32,
+        em: &str,
+        chosen: &mut Option<String>,
+    ) -> bool {
+        let (rect, resp) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
+        let p = ui.painter();
+        p.rect_filled(rect, CornerRadius::same(3), paper.gamma_multiply(0.14));
+        p.rect_stroke(
+            rect,
+            CornerRadius::same(3),
+            Stroke::new(0.8_f32, paper.gamma_multiply(0.22)),
+            StrokeKind::Inside,
+        );
+        if resp.hovered() {
+            p.rect_filled(
+                rect,
+                CornerRadius::same(3),
+                self.look.accent.gamma_multiply(0.25),
+            );
+        }
+        self.paint_emoji(ctx, &p, rect.shrink(4.0), em);
+        let _ = (paper, ink);
+        if resp.clicked() {
+            *chosen = Some(em.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    fn casse_clear(&self, ui: &mut Ui, paper: Color32, ink: Color32) -> bool {
+        let (rect, resp) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
+        let p = ui.painter();
+        p.rect_stroke(
+            rect,
+            CornerRadius::same(3),
+            Stroke::new(0.9_f32, paper.gamma_multiply(0.28)),
+            StrokeKind::Inside,
+        );
+        p.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "×",
+            self.look.mono(16.0),
+            paper.gamma_multiply(0.55),
+        );
+        let _ = ink;
+        resp.clicked()
+    }
+
+    fn cahier_dos(
+        &mut self,
+        ui: &mut Ui,
+        meta: &crate::library::NoteMeta,
+        selected: bool,
+    ) -> Option<DosAct> {
         let slot = vec2(
             DOS_W + DOS_PAD * 2.0,
             DOS_PAD + PAPER_PEEK + DOS_H + ICON_ROW,
@@ -1534,7 +2133,9 @@ impl CahierApp {
         if over {
             ui.ctx().request_repaint();
         }
-        let lift_t = ui.ctx().animate_bool_with_time(id.with("peek"), over, 0.16);
+        let lift_t = ui
+            .ctx()
+            .animate_bool_with_time(id.with("peek"), over || selected, 0.16);
         let e = lift_t * lift_t * (3.0 - 2.0 * lift_t);
         let cloth = self.look.cloth_at(meta.cover);
         let cloth_deep = shade_rgb(cloth, 0.70);
@@ -1609,6 +2210,29 @@ impl CahierApp {
             Stroke::new(1.0_f32, cloth_edge),
             StrokeKind::Inside,
         );
+        if selected {
+            let sel = self.look.accent;
+            let pad = 4.0;
+            let r = face.expand(pad);
+            painter.rect_stroke(
+                r,
+                CornerRadius::same(10),
+                Stroke::new(1.6_f32, sel),
+                StrokeKind::Outside,
+            );
+            // Coins de sélection, comme un cadre photo
+            let arm = 10.0;
+            let s = Stroke::new(2.0_f32, sel);
+            for (o, dx, dy) in [
+                (r.left_top(), 1.0, 1.0),
+                (r.right_top(), -1.0, 1.0),
+                (r.left_bottom(), 1.0, -1.0),
+                (r.right_bottom(), -1.0, -1.0),
+            ] {
+                painter.line_segment([o, o + vec2(arm * dx, 0.0)], s);
+                painter.line_segment([o, o + vec2(0.0, arm * dy)], s);
+            }
+        }
         for i in 0..3 {
             let o = i as f32 * 1.5;
             painter.rect_filled(
@@ -1621,9 +2245,13 @@ impl CahierApp {
             );
         }
 
-        let body = Rect::from_min_max(pos2(face.min.x + 18.0, face.min.y), face.max);
-        let mark = body.center() + vec2(0.0, -18.0);
-        let logo_r = Rect::from_center_size(mark, vec2(52.0, 52.0));
+        // Centre du cartonnage, hors dos et hors titre.
+        let cover = Rect::from_min_max(
+            pos2(face.min.x + 13.0, face.min.y + 14.0),
+            pos2(face.max.x - 6.0, face.max.y - TITLE_H - 16.0),
+        );
+        let mark = cover.center();
+        let logo_r = Rect::from_center_size(mark, vec2(56.0, 56.0));
         let emoji = meta.emoji.trim();
         let painted = !emoji.is_empty() && self.paint_emoji(ui.ctx(), &painter, logo_r, emoji);
         if !painted {
@@ -1656,7 +2284,7 @@ impl CahierApp {
             pos2(face.min.x + 16.0, face.max.y - TITLE_H - 10.0),
             vec2(face.width() - 20.0, TITLE_H),
         );
-        let renaming = self.rename_id == Some(meta.id);
+        let renaming = self.rename_id == Some(meta.id) && !self.shelf_trash;
         if renaming {
             let mut commit = false;
             let mut cancel = false;
@@ -1727,24 +2355,28 @@ impl CahierApp {
                 self.look.serif(17.0),
                 paper,
             );
-            let title_resp = ui.interact(title_rect, id.with("title"), Sense::click());
-            if title_resp.clicked() {
-                self.rename_buf = meta.title.clone();
-                self.rename_id = Some(meta.id);
+            if !self.shelf_trash {
+                let title_resp = ui.interact(title_rect, id.with("title"), Sense::click());
+                if title_resp.clicked() {
+                    self.rename_buf = meta.title.clone();
+                    self.rename_id = Some(meta.id);
+                }
+                title_resp.on_hover_cursor(CursorIcon::Text);
             }
-            title_resp.on_hover_cursor(CursorIcon::Text);
         }
 
         let mut act = None;
-        let logo_resp = ui.interact(logo_r, id.with("logo"), Sense::click());
-        if logo_resp.clicked() {
-            act = Some(DosAct::Emoji);
+        if !self.shelf_trash {
+            let logo_resp = ui.interact(logo_r, id.with("logo"), Sense::click());
+            if logo_resp.clicked() {
+                act = Some(DosAct::Emoji);
+            }
+            logo_resp
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text("Icon");
         }
-        logo_resp
-            .on_hover_cursor(CursorIcon::PointingHand)
-            .on_hover_text("Icon");
 
-        let show_icons = e > 0.08 && !renaming;
+        let show_icons = e > 0.08 && !renaming && !self.shelf_trash;
         if show_icons {
             let trash_col = self
                 .look
@@ -1787,7 +2419,7 @@ impl CahierApp {
             }
             if self
                 .dos_icon(ui, &painter, id.with("del"), del_r, trash, paint_bin)
-                .on_hover_text("Delete")
+                .on_hover_text("Corbeille")
                 .clicked()
             {
                 act = Some(DosAct::Del);
@@ -1797,47 +2429,72 @@ impl CahierApp {
         let mut menu_act = None;
         resp.context_menu(|ui| {
             ui.set_min_width(140.0);
-            if ui.button("Open").clicked() {
-                menu_act = Some(DosAct::Open);
-                ui.close();
-            }
-            if ui.button("Rename").clicked() {
-                menu_act = Some(DosAct::Rename);
-                ui.close();
-            }
-            if ui.button("Icon…").clicked() {
-                menu_act = Some(DosAct::Emoji);
-                ui.close();
-            }
-            if ui.button("Duplicate").clicked() {
-                menu_act = Some(DosAct::Dup);
-                ui.close();
-            }
-            ui.separator();
-            if ui
-                .button(if meta.pinned { "Unpin" } else { "Pin" })
-                .clicked()
-            {
-                menu_act = Some(DosAct::Pin);
-                ui.close();
-            }
-            if ui
-                .button(RichText::new("Delete").color(Color32::from_rgb(0xe2, 0x4b, 0x4a)))
-                .clicked()
-            {
-                menu_act = Some(DosAct::Del);
-                ui.close();
+            if !self.shelf_trash {
+                if ui.button("Open").clicked() {
+                    menu_act = Some(DosAct::Open);
+                    ui.close();
+                }
+                if ui.button("Rename").clicked() {
+                    menu_act = Some(DosAct::Rename);
+                    ui.close();
+                }
+                if ui.button("Icon…").clicked() {
+                    menu_act = Some(DosAct::Emoji);
+                    ui.close();
+                }
+                if ui.button("Duplicate").clicked() {
+                    menu_act = Some(DosAct::Dup);
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .button(if meta.pinned { "Unpin" } else { "Pin" })
+                    .clicked()
+                {
+                    menu_act = Some(DosAct::Pin);
+                    ui.close();
+                }
+                if ui
+                    .button(RichText::new("Corbeille").color(Color32::from_rgb(0xe2, 0x4b, 0x4a)))
+                    .clicked()
+                {
+                    menu_act = Some(DosAct::Del);
+                    ui.close();
+                }
+            } else {
+                if ui.button("Restaurer").clicked() {
+                    menu_act = Some(DosAct::Restore);
+                    ui.close();
+                }
+                if ui
+                    .button(
+                        RichText::new("Supprimer").color(Color32::from_rgb(0xe2, 0x4b, 0x4a)),
+                    )
+                    .clicked()
+                {
+                    menu_act = Some(DosAct::Del);
+                    ui.close();
+                }
             }
         });
         if menu_act.is_some() {
             act = menu_act;
         }
 
-        if act.is_none() && !renaming && resp.clicked() {
+        if act.is_none() && !renaming {
             let on_title = pointer.is_some_and(|p| title_rect.contains(p));
             let on_logo = pointer.is_some_and(|p| logo_r.contains(p));
-            if !on_title && !on_logo {
+            let mods = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+            if resp.double_clicked() && !on_title && !on_logo && !self.shelf_trash {
                 act = Some(DosAct::Open);
+            } else if resp.clicked() && !on_title && !on_logo {
+                act = Some(if mods.0 {
+                    DosAct::Toggle
+                } else if mods.1 {
+                    DosAct::Range
+                } else {
+                    DosAct::Select
+                });
             }
         }
         if !renaming {

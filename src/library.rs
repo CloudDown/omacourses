@@ -78,6 +78,8 @@ pub struct Index {
     pub seeded: bool,
     pub notes: Vec<NoteMeta>,
     #[serde(default)]
+    pub trash: Vec<NoteMeta>,
+    #[serde(default)]
     pub dock: DockEdge,
     #[serde(default, alias = "hand")]
     pub mode: NoteMode,
@@ -95,6 +97,7 @@ impl Default for Index {
         Self {
             seeded: false,
             notes: Vec::new(),
+            trash: Vec::new(),
             dock: DockEdge::default(),
             mode: NoteMode::default(),
             fiche_pliee: true,
@@ -169,9 +172,47 @@ impl Library {
         self.save_note(note);
     }
 
+    /// Supprime définitivement (hors corbeille).
+    #[allow(dead_code)]
     pub fn delete_note(&mut self, id: Uuid) {
-        self.index.notes.retain(|m| m.id != id);
+        self.trash_note(id);
+        self.purge_trashed(id);
+    }
+
+    /// Met le cahier dans la corbeille (fichiers conservés).
+    pub fn trash_note(&mut self, id: Uuid) {
+        if let Some(i) = self.index.notes.iter().position(|m| m.id == id) {
+            let meta = self.index.notes.remove(i);
+            self.index.trash.retain(|m| m.id != id);
+            self.index.trash.insert(0, meta);
+            self.save_index();
+        }
+    }
+
+    pub fn restore_note(&mut self, id: Uuid) {
+        if let Some(i) = self.index.trash.iter().position(|m| m.id == id) {
+            let meta = self.index.trash.remove(i);
+            self.index.notes.retain(|m| m.id != id);
+            self.index.notes.push(meta);
+            self.index
+                .notes
+                .sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.updated.cmp(&a.updated)));
+            self.save_index();
+        }
+    }
+
+    pub fn purge_trashed(&mut self, id: Uuid) {
+        self.index.trash.retain(|m| m.id != id);
         let _ = fs::remove_dir_all(self.note_dir(id));
+        self.save_index();
+    }
+
+    pub fn empty_trash(&mut self) {
+        let ids: Vec<_> = self.index.trash.iter().map(|m| m.id).collect();
+        self.index.trash.clear();
+        for id in ids {
+            let _ = fs::remove_dir_all(self.note_dir(id));
+        }
         self.save_index();
     }
 
