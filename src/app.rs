@@ -955,11 +955,11 @@ impl CahierApp {
             .show(ctx, |ui| {
                 ui.add_space(22.0);
                 ui.horizontal(|ui| {
-                    ui.add_space(28.0);
+                    ui.add_space(78.0);
                     let Scene::Shelf { query } = &mut self.scene else {
                         return;
                     };
-                    let search_w = (ui.available_width() - 88.0).clamp(200.0, 720.0);
+                    let search_w = (ui.available_width() - 28.0).clamp(200.0, 720.0);
                     Frame::NONE
                         .fill(self.look.desk_deep)
                         .corner_radius(22)
@@ -990,7 +990,7 @@ impl CahierApp {
                 if notes.is_empty() {
                     ui.add_space(48.0);
                     ui.horizontal(|ui| {
-                        ui.add_space(28.0);
+                        ui.add_space(78.0);
                         ui.label(
                             RichText::new("No notes yet")
                                 .font(self.look.serif(22.0))
@@ -1009,14 +1009,14 @@ impl CahierApp {
 
                 ScrollArea::vertical().show(ui, |ui| {
                     ui.add_space(4.0);
-                    let available = ui.available_width() - 48.0;
+                    let available = ui.available_width() - 98.0;
                     let card_w = DOS_W + DOS_PAD * 2.0;
                     let gap = 6.0;
                     let cols = ((available + gap) / (card_w + gap)).floor().max(1.0) as usize;
                     let mut i = 0;
                     while i < notes.len() {
                         ui.horizontal(|ui| {
-                            ui.add_space(28.0);
+                            ui.add_space(78.0);
                             for _ in 0..cols {
                                 if i >= notes.len() {
                                     break;
@@ -1083,110 +1083,156 @@ impl CahierApp {
             });
 
         let fiche_ouverte = !self.lib.index.fiche_pliee;
+        // La fiche sort sous le signet : la queue du ruban reste prise dans la page.
+        if fiche_ouverte {
+            Area::new(Id::new("shelf-tuto-fiche"))
+                .anchor(Align2::LEFT_TOP, vec2(16.0, 46.0))
+                .order(Order::Foreground)
+                .show(ctx, |ui| {
+                    self.fiche_pupitre(ui);
+                });
+        }
         Area::new(Id::new("shelf-tuto-btn"))
-            .anchor(Align2::RIGHT_TOP, vec2(-24.0, -20.0))
+            .anchor(Align2::LEFT_TOP, vec2(14.0, 14.0))
             .order(Order::Foreground)
             .show(ctx, |ui| {
                 if self
-                    .help_seal(ui, fiche_ouverte)
-                    .on_hover_text(if fiche_ouverte { "Close" } else { "Help" })
+                    .help_signet(ui, fiche_ouverte)
+                    .on_hover_text(if fiche_ouverte { "Replier" } else { "Aide" })
                     .clicked()
                 {
                     self.lib.index.fiche_pliee = !self.lib.index.fiche_pliee;
                     self.lib.save_index();
                 }
             });
-        if !self.lib.index.fiche_pliee {
-            Area::new(Id::new("shelf-tuto-fiche"))
-                .anchor(Align2::RIGHT_TOP, vec2(-24.0, -82.0))
-                .order(Order::Foreground)
-                .show(ctx, |ui| {
-                    self.fiche_pupitre(ui);
-                });
-        }
         if let Some(id) = self.emoji_pick {
             self.ui_emoji_picker(ctx, id);
         }
     }
 
-    fn help_seal(&self, ui: &mut Ui, open: bool) -> Response {
-        let size = 52.0;
-        let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    /// Signet de la fiche : papier, cran en V, astérisque de marge.
+    /// Il pend dans la gouttière gauche, à hauteur de la recherche.
+    fn help_signet(&self, ui: &mut Ui, open: bool) -> Response {
+        let w = 32.0;
+        let h = 66.0;
+        // Marge à droite pour l'ombre, à gauche pour la penche.
+        let (rect, resp) = ui.allocate_exact_size(vec2(w + 16.0, h + 14.0), Sense::click());
         let p = ui.painter();
-        let id = Id::new("help-seal");
+        let id = Id::new("help-signet");
         let hover_t = ui
             .ctx()
-            .animate_bool_with_time(id.with("h"), resp.hovered() || open, 0.22);
+            .animate_bool_with_time(id.with("h"), resp.hovered() || open, 0.2);
         let e = hover_t * hover_t * (3.0 - 2.0 * hover_t);
-        let c = rect.center() - vec2(0.0, e * 1.5);
-        let r = size * 0.44;
+        // La queue part vers la page, pas vers le bord de la fenêtre.
+        let lean = (1.0 - e) * -0.05;
+        let drop = if open { 0.0 } else { e * 5.0 };
 
-        // Soft desk shadow
-        p.circle_filled(
-            c + vec2(1.6, 3.2 + e),
-            r + 0.5,
-            self.look.shadow.gamma_multiply(0.45 + 0.15 * e),
-        );
+        let l = rect.left() + 2.0;
+        let r = l + w;
+        let t = rect.top();
+        let b = t + h;
+        let notch = 11.0;
+        let shoulder = b - notch;
+        let cx = (l + r) * 0.5;
+        let origin = pos2(cx, t);
 
-        // Wax body
-        let wax = if open {
-            self.look.accent
-        } else {
-            mix_col(self.look.paper, self.look.accent, 0.08 + 0.12 * e)
+        let xform = |pt: Pos2| -> Pos2 {
+            let d = pt - origin;
+            let (s, c) = lean.sin_cos();
+            origin + vec2(d.x * c - d.y * s, d.x * s + d.y * c) + vec2(0.0, drop)
         };
-        p.circle_filled(c, r, wax);
-        // Emboss rim
-        p.circle_stroke(
-            c,
-            r - 0.4,
-            Stroke::new(
-                2.2_f32,
-                if open {
-                    self.look.desk_deep.gamma_multiply(0.28)
-                } else {
-                    self.look.ink.gamma_multiply(0.16)
-                },
-            ),
-        );
-        p.circle_stroke(
-            c,
-            r * 0.72,
-            Stroke::new(
-                1.05_f32,
-                if open {
-                    self.look.desk_deep.gamma_multiply(0.22)
-                } else {
-                    self.look.ink.gamma_multiply(0.10)
-                },
-            ),
-        );
-        // Tiny bead marks around the rim
-        for i in 0..8 {
-            let a = i as f32 * std::f32::consts::TAU / 8.0 + 0.2;
-            let bead = c + vec2(a.cos(), a.sin()) * (r * 0.86);
-            p.circle_filled(
-                bead,
-                1.15,
-                if open {
-                    self.look.desk_deep.gamma_multiply(0.35)
-                } else {
-                    self.look.ink.gamma_multiply(0.18)
-                },
-            );
+        let poly = |pts: &[Pos2], color: Color32| {
+            p.add(Shape::convex_polygon(
+                pts.iter().copied().map(xform).collect(),
+                color,
+                Stroke::NONE,
+            ));
+        };
+        let seg = |a: Pos2, b: Pos2, stroke: Stroke| {
+            p.line_segment([xform(a), xform(b)], stroke);
+        };
+
+        let paper = mix_col(self.look.paper, self.look.accent, 0.035);
+        let ink = self.look.ink;
+        let edge = ink.gamma_multiply(0.20);
+        let thread = ink.gamma_multiply(0.28);
+
+        // Le corps s'arrête au-dessus du cran ; les volets le recouvrent.
+        // Sinon le bord du rectangle barre l'entrée du V.
+        let y0 = shoulder - 2.2;
+        let body = [
+            pos2(l, t),
+            pos2(r, t),
+            pos2(r, y0 + 0.8),
+            pos2(l, y0 + 0.8),
+        ];
+        let left_flap = [
+            pos2(l, y0 - 0.8),
+            pos2(cx, y0 - 0.8),
+            pos2(cx, shoulder),
+            pos2(l, b),
+        ];
+        let right_flap = [
+            pos2(cx, y0 - 0.8),
+            pos2(r, y0 - 0.8),
+            pos2(r, b),
+            pos2(cx, shoulder),
+        ];
+
+        for (dx, dy, a) in [(2.2, 4.2, 0.55_f32), (0.8, 1.6, 0.28_f32)] {
+            let sh = |pt: Pos2| xform(pt) + vec2(dx, dy + e * 1.2);
+            let shadow = self.look.shadow.gamma_multiply(a);
+            for pts in [&body[..], &left_flap[..], &right_flap[..]] {
+                p.add(Shape::convex_polygon(
+                    pts.iter().copied().map(sh).collect(),
+                    shadow,
+                    Stroke::NONE,
+                ));
+            }
         }
 
-        let fg = if open {
-            self.look.desk_deep
-        } else {
-            self.look.ink
-        };
-        p.text(
-            c + vec2(0.0, -1.0),
-            Align2::CENTER_CENTER,
-            "?",
-            self.look.serif(26.0),
-            fg,
+        poly(&body, paper);
+        poly(&left_flap, paper);
+        poly(&right_flap, paper);
+
+        let hair = Stroke::new(1.0_f32, edge);
+        seg(pos2(l, t), pos2(r, t), hair);
+        seg(pos2(r, t), pos2(r, b), hair);
+        seg(pos2(r, b), pos2(cx, shoulder), hair);
+        seg(pos2(cx, shoulder), pos2(l, b), hair);
+        seg(pos2(l, b), pos2(l, t), hair);
+
+        // Filet de tête, comme l'en-tête de la fiche.
+        let rule = Stroke::new(1.15_f32, ink.gamma_multiply(0.55));
+        seg(pos2(l + 6.0, t + 9.0), pos2(r - 6.0, t + 9.0), rule);
+        seg(
+            pos2(cx - 6.0, t + 12.4),
+            pos2(cx + 6.0, t + 12.4),
+            Stroke::new(0.8_f32, ink.gamma_multiply(0.28)),
         );
+
+        // Trou de ruban : on voit le pupitre au travers.
+        let hole = xform(pos2(cx, t + 20.0));
+        p.circle_filled(hole, 2.15, self.look.desk_deep);
+        p.circle_stroke(hole, 2.15, Stroke::new(0.9_f32, edge));
+
+        // Astérisque de marge — la note, pas un point d'interrogation.
+        let mark = mix_col(ink.gamma_multiply(0.62), self.look.accent, e);
+        let star = xform(pos2(cx, t + 32.0));
+        let arm = 4.6 + e * 0.5;
+        for i in 0..3 {
+            let a = i as f32 * std::f32::consts::FRAC_PI_3;
+            let d = vec2(a.cos(), a.sin()) * arm;
+            p.line_segment([star - d, star + d], Stroke::new(1.05_f32, mark));
+        }
+
+        let dash = Stroke::new(0.9_f32, thread);
+        let mut y = t + 38.0;
+        while y < shoulder - 3.0 {
+            seg(pos2(cx, y), pos2(cx, (y + 3.2).min(shoulder - 2.0)), dash);
+            y += 6.4;
+        }
+
         resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
