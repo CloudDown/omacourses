@@ -234,7 +234,8 @@ fn load_omarchy_colors() -> (Option<toml::Table>, String, String, Option<SystemT
         return (table, slug.clone(), pretty_name(&slug), mtime);
     }
 
-    let pretty = stdout_trim("omarchy", &["theme", "current"]).unwrap_or_else(|| "Tokyo Night".into());
+    let pretty =
+        stdout_trim("omarchy", &["theme", "current"]).unwrap_or_else(|| "Tokyo Night".into());
     let slug = slugify(&pretty);
     let dir = stdout_trim("omarchy", &["theme", "dir", &slug])
         .map(PathBuf::from)
@@ -316,7 +317,9 @@ fn find_theme_dir(slug: &str) -> Option<PathBuf> {
         PathBuf::from("/usr/share/omarchy/themes").join(slug),
         current_dir(),
     ];
-    candidates.into_iter().find(|p| p.join("colors.toml").exists())
+    candidates
+        .into_iter()
+        .find(|p| p.join("colors.toml").exists())
 }
 
 fn slugify(name: &str) -> String {
@@ -369,5 +372,9 @@ fn stdout_trim(cmd: &str, args: &[&str]) -> Option<String> {
         return None;
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }

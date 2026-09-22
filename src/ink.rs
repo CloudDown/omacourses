@@ -1,6 +1,6 @@
 //! Encre vectorielle : points, pression, ruban, formes.
 
-use egui::{Color32, Mesh, Pos2, Stroke as EStroke, TextureId, Vec2, epaint::Vertex};
+use egui::{epaint::Vertex, Color32, Mesh, Pos2, Stroke as EStroke, TextureId, Vec2};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -159,7 +159,12 @@ impl InkStroke {
 
     pub fn tessellate(&mut self) -> &Mesh {
         if self.mesh.is_none() {
-            self.mesh = Some(ribbon_mesh(&self.points, self.width, self.nib, self.color32()));
+            self.mesh = Some(ribbon_mesh(
+                &self.points,
+                self.width,
+                self.nib,
+                self.color32(),
+            ));
         }
         self.mesh.as_ref().unwrap()
     }
@@ -180,7 +185,12 @@ pub fn ribbon_mesh(points: &[InkPoint], width: f32, nib: Nib, color: Color32) ->
     }
     let color = premultiply(color);
     if points.len() == 1 {
-        add_disc(&mut mesh, points[0].pos(), width * 0.45 * points[0].p, color);
+        add_disc(
+            &mut mesh,
+            points[0].pos(),
+            width * 0.45 * points[0].p,
+            color,
+        );
         return mesh;
     }
 
@@ -211,7 +221,12 @@ pub fn ribbon_mesh(points: &[InkPoint], width: f32, nib: Nib, color: Color32) ->
         right.push(pt.pos() - n * r);
     }
 
-    add_disc(&mut mesh, points[0].pos(), dist(points[0].pos(), left[0]), color);
+    add_disc(
+        &mut mesh,
+        points[0].pos(),
+        dist(points[0].pos(), left[0]),
+        color,
+    );
     add_disc(
         &mut mesh,
         points.last().unwrap().pos(),
@@ -288,7 +303,8 @@ fn add_disc(mesh: &mut Mesh, c: Pos2, r: f32, color: Color32) {
         });
     }
     for i in 0..n {
-        mesh.indices.extend_from_slice(&[start, start + i + 1, start + i + 2]);
+        mesh.indices
+            .extend_from_slice(&[start, start + i + 1, start + i + 2]);
     }
 }
 
@@ -396,7 +412,14 @@ fn line_stroke(stroke: &InkStroke) -> InkStroke {
     let b = *stroke.points.last().unwrap();
     let mut s = stroke.clone();
     s.id = Uuid::new_v4();
-    s.points = vec![a, InkPoint { x: b.x, y: b.y, p: a.p }];
+    s.points = vec![
+        a,
+        InkPoint {
+            x: b.x,
+            y: b.y,
+            p: a.p,
+        },
+    ];
     s.mesh = None;
     s
 }
@@ -419,7 +442,12 @@ fn fit_circle(stroke: &InkStroke) -> Option<InkStroke> {
         .fold(Vec2::ZERO, |acc, p| acc + p.pos().to_vec2())
         / n;
     let c = Pos2::new(c.x, c.y);
-    let r = stroke.points.iter().map(|p| p.pos().distance(c)).sum::<f32>() / n;
+    let r = stroke
+        .points
+        .iter()
+        .map(|p| p.pos().distance(c))
+        .sum::<f32>()
+        / n;
     if r < 12.0 {
         return None;
     }

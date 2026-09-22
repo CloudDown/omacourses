@@ -187,12 +187,7 @@ impl Note {
     }
 }
 
-pub fn stroke_from_polyline(
-    pts: &[[f32; 2]],
-    nib: Nib,
-    color: Color32,
-    width: f32,
-) -> InkStroke {
+pub fn stroke_from_polyline(pts: &[[f32; 2]], nib: Nib, color: Color32, width: f32) -> InkStroke {
     let mut s = InkStroke::new(nib, color, width);
     for p in pts {
         s.points.push(InkPoint::new(Pos2::new(p[0], p[1]), 0.85));

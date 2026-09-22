@@ -159,11 +159,9 @@ impl Library {
                 emoji: note.emoji.clone(),
             });
         }
-        self.index.notes.sort_by(|a, b| {
-            b.pinned
-                .cmp(&a.pinned)
-                .then(b.updated.cmp(&a.updated))
-        });
+        self.index
+            .notes
+            .sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.updated.cmp(&a.updated)));
         self.save_index();
     }
 

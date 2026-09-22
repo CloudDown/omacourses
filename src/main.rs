@@ -1,6 +1,7 @@
 mod app;
 mod camera;
 mod document;
+mod emoji;
 mod export;
 mod fonts;
 mod ink;
@@ -70,7 +71,10 @@ fn main() -> eframe::Result<()> {
         Some("--theme") => {
             let look = crate::look::Look::load();
             println!("theme: {}", look.name.to_lowercase());
-            println!("file:  {}", crate::look::current_dir().join("colors.toml").display());
+            println!(
+                "file:  {}",
+                crate::look::current_dir().join("colors.toml").display()
+            );
             println!("desk:  {}", hex(look.desk));
             println!("accent:{}", hex(look.accent));
             println!("ink:   {}", hex(look.fg));

@@ -1,4 +1,4 @@
-use crate::document::{stroke_from_polyline, squiggle, Note, PaperKind, TextBox, PAGE_W};
+use crate::document::{squiggle, stroke_from_polyline, Note, PaperKind, TextBox, PAGE_W};
 use crate::ink::{InkStroke, Nib};
 use crate::library::Library;
 use egui::{Color32, Pos2};
@@ -60,9 +60,15 @@ fn note_direction() -> Note {
     );
     n.pages[0].texts.push(text(72.0, 64.0, 17.0, body, ink));
     // petit plan : trois rectangles d'espacement (gaps Hyprland)
-    n.pages[0].strokes.push(rect_stroke(520.0, 720.0, 200.0, 120.0, red, 2.4));
-    n.pages[0].strokes.push(rect_stroke(530.0, 730.0, 80.0, 100.0, ink, 1.6));
-    n.pages[0].strokes.push(rect_stroke(620.0, 730.0, 90.0, 100.0, ink, 1.6));
+    n.pages[0]
+        .strokes
+        .push(rect_stroke(520.0, 720.0, 200.0, 120.0, red, 2.4));
+    n.pages[0]
+        .strokes
+        .push(rect_stroke(530.0, 730.0, 80.0, 100.0, ink, 1.6));
+    n.pages[0]
+        .strokes
+        .push(rect_stroke(620.0, 730.0, 90.0, 100.0, ink, 1.6));
     n
 }
 
@@ -75,17 +81,16 @@ fn text(x: f32, y: f32, size: f32, s: &str, color: Color32) -> TextBox {
 }
 
 fn underline(x: f32, y: f32, w: f32, color: Color32) -> InkStroke {
-    stroke_from_polyline(&squiggle(Pos2::new(x, y), Pos2::new(x + w, y + 3.0), 1.6, 18), Nib::Brush, color, 3.2)
+    stroke_from_polyline(
+        &squiggle(Pos2::new(x, y), Pos2::new(x + w, y + 3.0), 1.6, 18),
+        Nib::Brush,
+        color,
+        3.2,
+    )
 }
 
 fn rect_stroke(x: f32, y: f32, w: f32, h: f32, color: Color32, width: f32) -> InkStroke {
-    let pts = [
-        [x, y],
-        [x + w, y],
-        [x + w, y + h],
-        [x, y + h],
-        [x, y],
-    ];
+    let pts = [[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]];
     let mut dense = Vec::new();
     for pair in pts.windows(2) {
         for i in 0..=6 {

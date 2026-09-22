@@ -281,15 +281,13 @@ impl Dispatch<WlRegistry, ()> for TabletState {
                 }
                 "zwp_tablet_manager_v2" | "wp_tablet_manager_v2" => {
                     if state.manager.is_none() {
-                        state.manager =
-                            Some(registry.bind(name, version.min(2), qh, ()));
+                        state.manager = Some(registry.bind(name, version.min(2), qh, ()));
                         state.bind_tablet_seats(qh);
                     }
                 }
                 "zwp_pointer_gestures_v1" => {
                     if state.gestures.is_none() {
-                        state.gestures =
-                            Some(registry.bind(name, version.min(1), qh, ()));
+                        state.gestures = Some(registry.bind(name, version.min(1), qh, ()));
                         state.bind_pinches(qh);
                     }
                 }
@@ -353,12 +351,7 @@ impl Dispatch<ZwpPointerGesturePinchV1, ()> for TabletState {
                     state.pinch_last_scale = 1.0;
                 }
             }
-            zwp_pointer_gesture_pinch_v1::Event::Update {
-                dx,
-                dy,
-                scale,
-                ..
-            } => {
+            zwp_pointer_gesture_pinch_v1::Event::Update { dx, dy, scale, .. } => {
                 let scale = scale as f32;
                 if state.pinch_last_scale > 0.05 {
                     state.pinch_zoom *= scale / state.pinch_last_scale;
@@ -433,10 +426,8 @@ impl Dispatch<ZwpTabletToolV2, ()> for TabletState {
     ) {
         match event {
             zwp_tablet_tool_v2::Event::Type { tool_type } => {
-                state.eraser_tool = matches!(
-                    tool_type,
-                    WEnum::Value(zwp_tablet_tool_v2::Type::Eraser)
-                );
+                state.eraser_tool =
+                    matches!(tool_type, WEnum::Value(zwp_tablet_tool_v2::Type::Eraser));
             }
             zwp_tablet_tool_v2::Event::ProximityIn { .. } => {
                 state.in_proximity = true;
@@ -476,7 +467,9 @@ impl Dispatch<ZwpTabletToolV2, ()> for TabletState {
                     state.pressure = Some(p);
                 }
             }
-            zwp_tablet_tool_v2::Event::Button { button, state: st, .. } => {
+            zwp_tablet_tool_v2::Event::Button {
+                button, state: st, ..
+            } => {
                 let pressed = matches!(st, WEnum::Value(zwp_tablet_tool_v2::ButtonState::Pressed));
                 if button == BTN_STYLUS {
                     if pressed {

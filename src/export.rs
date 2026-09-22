@@ -8,7 +8,13 @@ use flate2::Compression;
 use fontdue::{Font, FontSettings};
 use tiny_skia::{Color, FillRule, Paint, Path, PathBuilder, Pixmap, Stroke as SkStroke, Transform};
 
-pub fn raster_page(note: &Note, page_i: usize, look: &Look, scale: f32, media: &MediaLoader) -> Option<Pixmap> {
+pub fn raster_page(
+    note: &Note,
+    page_i: usize,
+    look: &Look,
+    scale: f32,
+    media: &MediaLoader,
+) -> Option<Pixmap> {
     let page = note.pages.get(page_i)?;
     let (page_w, page_h) = note.page_size();
     let w = (page_w * scale).round() as u32;
@@ -24,7 +30,16 @@ pub fn raster_page(note: &Note, page_i: usize, look: &Look, scale: f32, media: &
     draw_template(&mut pm, note.paper, look, t, page_w, page_h);
     for im in &page.images {
         if let Some((iw, ih, rgba)) = media.rgba(&im.file) {
-            blit(&mut pm, im.pos[0] * scale, im.pos[1] * scale, im.size[0] * scale, im.size[1] * scale, iw, ih, &rgba);
+            blit(
+                &mut pm,
+                im.pos[0] * scale,
+                im.pos[1] * scale,
+                im.size[0] * scale,
+                im.size[1] * scale,
+                iw,
+                ih,
+                &rgba,
+            );
         }
     }
     for s in &page.strokes {
@@ -88,7 +103,12 @@ fn fill_stroke(pm: &mut Pixmap, stroke: &InkStroke, t: Transform) {
         return;
     };
     let mut paint = Paint::default();
-    paint.set_color_rgba8(stroke.color[0], stroke.color[1], stroke.color[2], stroke.color[3]);
+    paint.set_color_rgba8(
+        stroke.color[0],
+        stroke.color[1],
+        stroke.color[2],
+        stroke.color[3],
+    );
     paint.anti_alias = true;
     pm.fill_path(&path, &paint, FillRule::Winding, t, None);
 }
@@ -106,7 +126,14 @@ fn poly_path(pts: &[egui::Pos2]) -> Option<Path> {
     pb.finish()
 }
 
-fn draw_template(pm: &mut Pixmap, kind: PaperKind, look: &Look, t: Transform, page_w: f32, page_h: f32) {
+fn draw_template(
+    pm: &mut Pixmap,
+    kind: PaperKind,
+    look: &Look,
+    t: Transform,
+    page_w: f32,
+    page_h: f32,
+) {
     let mut paint = Paint::default();
     paint.anti_alias = true;
     let mut stroke = SkStroke::default();
@@ -226,7 +253,16 @@ fn blit(pm: &mut Pixmap, x: f32, y: f32, dw: f32, dh: f32, iw: u32, ih: u32, rgb
     );
 }
 
-fn draw_text(pm: &mut Pixmap, font: &Font, text: &str, x: f32, y: f32, max_w: f32, size: f32, color: Color) {
+fn draw_text(
+    pm: &mut Pixmap,
+    font: &Font,
+    text: &str,
+    x: f32,
+    y: f32,
+    max_w: f32,
+    size: f32,
+    color: Color,
+) {
     let mut cx = x;
     let mut cy = y + size;
     let line_h = size * 1.28;
@@ -241,7 +277,15 @@ fn draw_text(pm: &mut Pixmap, font: &Font, text: &str, x: f32, y: f32, max_w: f3
             cx = x;
             cy += line_h;
         }
-        stamp_glyph(pm, &bitmap, metrics.width, metrics.height, cx + metrics.xmin as f32, cy - metrics.height as f32 - metrics.ymin as f32, color);
+        stamp_glyph(
+            pm,
+            &bitmap,
+            metrics.width,
+            metrics.height,
+            cx + metrics.xmin as f32,
+            cy - metrics.height as f32 - metrics.ymin as f32,
+            color,
+        );
         cx += metrics.advance_width;
     }
 }
@@ -399,8 +443,11 @@ fn simple_pdf(pages: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
         body.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
     }
     body.extend_from_slice(
-        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n", max_id + 1)
-            .as_bytes(),
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n",
+            max_id + 1
+        )
+        .as_bytes(),
     );
     body
 }
