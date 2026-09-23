@@ -7,14 +7,16 @@ use eframe::egui::*;
 use uuid::Uuid;
 
 use crate::camera::{page_at_y, page_origin, Camera, ZOOM_STOPS};
-use crate::document::{ImageObj, Note, PaperKind, TextBox, PAGE_H, PAGE_SPAN, PAGE_W};
+use crate::document::{ImageObj, Note, PaperKind, TextBox, PAGE_H, PAGE_W};
 use crate::emoji::{Atlas, FAVORITES};
 use crate::export::{self, MediaLoader};
 use crate::ink::{
     default_width, draw_ants, erase_area, map_mesh, maybe_snap_shape, mixed_pressure, InkPoint,
     InkStroke, Nib, Tool,
 };
-use crate::library::{ensure_png, image_size, DockEdge, Library, NoteMode};
+use crate::library::{
+    ensure_png, image_size, DockEdge, Library, SHELF_COLS, SHELF_ROWS, SHELF_SLOTS,
+};
 use crate::look::Look;
 use crate::pressure::Pressure;
 use crate::seed;
@@ -25,7 +27,8 @@ const DOS_W: f32 = 128.0;
 const DOS_H: f32 = 156.0;
 const DOS_PAD: f32 = 10.0;
 const PAPER_PEEK: f32 = 18.0;
-const TITLE_ROW: f32 = 30.0;
+const TITLE_ROW: f32 = 36.0;
+const SHELF_GAP: f32 = 8.0;
 
 #[derive(Clone)]
 enum Scene {
@@ -36,15 +39,9 @@ enum Scene {
 #[derive(Clone, Copy)]
 enum DosAct {
     Open,
-    Dup,
-    Pin,
-    Del,
-    Emoji,
-    Rename,
     Select,
     Toggle,
     Range,
-    Restore,
 }
 
 struct Toss {
@@ -75,6 +72,14 @@ struct Sel {
     kind: SelKind,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SheetEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
 pub struct CahierApp {
     look: Look,
     lib: Library,
@@ -82,6 +87,12 @@ pub struct CahierApp {
     note: Option<Note>,
     tool: Tool,
     color_i: usize,
+    /// Current ink (theme swatch or a free tint).
+    ink: Color32,
+    color_custom: bool,
+    /// Watercolor tin (large palette) is open.
+    tin_open: bool,
+    tin_hue: f32,
     width: f32,
     last_ink: Tool,
     last_ink_width: f32,
@@ -92,6 +103,10 @@ pub struct CahierApp {
     camera: Camera,
     undo: UndoStack,
     live: Option<(usize, InkStroke)>,
+    /// Still nib: anchor, since when, and the shape already shown.
+    shape_anchor: Option<Pos2>,
+    shape_still: Option<Instant>,
+    shape_preview: Option<InkStroke>,
     lasso: Vec<Pos2>,
     sel: Vec<Sel>,
     drag_last: Option<Pos2>,
@@ -105,7 +120,7 @@ pub struct CahierApp {
     last_ptr: Option<(Pos2, Instant)>,
     toast: Option<Toast>,
     need_fit: bool,
-    /// Page à cadrer en vue d’écriture (le dézoom montre la feuille entière).
+    /// Page to frame in writing view (top of the sheet).
     land_page: Option<usize>,
     title_buf: String,
     dock_edge: DockEdge,
@@ -113,41 +128,53 @@ pub struct CahierApp {
     dock_grab: Vec2,
     dock_moved: bool,
     canvas_rect: Rect,
+    /// Click held on a sheet ear: do not lay ink.
+    tab_held: bool,
     tablet: TabletBridge,
     live_from_pen: bool,
-    /// Évite de rebasculer en tablette tant que le stylet reste en proximité.
-    prox_flipped: bool,
-    /// Curseur souris masqué (stylet en proximité).
+    /// Mouse cursor hidden (stylus in proximity).
     cursor_off: bool,
-    /// Stylet était en proximité la frame d’avant (pour PointerGone).
+    /// Stylus was in proximity on the previous frame (for PointerGone).
     pen_was_prox: bool,
-    /// Sélecteur d’emoji ouvert pour ce note.
+    /// Emoji picker open for this note.
     emoji_pick: Option<Uuid>,
-    /// Filtre dans la casse à caractères.
+    /// Filter inside the type case.
     emoji_query: String,
-    /// Titre de dossier en cours d’édition.
+    /// Folder title currently being edited.
     rename_id: Option<Uuid>,
     rename_buf: String,
-    /// Le champ texte vient d’être posé : lui donner le clavier.
+    /// Title position, so the editor can sit outside the scroll.
+    rename_rect: Option<Rect>,
+    /// The text field was just placed: give it the keyboard.
     text_focus: bool,
-    /// Sélection style explorateur sur l’étagère.
+    /// Ink palette unfolded (panel beside the dock; dock size stays fixed).
+    palette_open: bool,
+    /// Stylus click that began on the chrome (not on the sheet).
+    pen_ui_grab: bool,
+    /// Open the image picker outside the click (system portal).
+    pending_image: Option<(usize, Pos2)>,
+    /// Explorer-style selection on the shelf.
     shelf_sel: Vec<Uuid>,
     shelf_anchor: Option<Uuid>,
-    /// Vue corbeille (sinon étagère active).
+    /// Trash view (otherwise the shelf is active).
     shelf_trash: bool,
-    /// Faces des dos, pour le rectangle de sélection.
+    /// Spine faces, for the selection rectangle.
     shelf_slots: Vec<(Uuid, Rect)>,
-    /// Origine du rectangle (None = pas de bande).
+    /// Origin of the rectangle (None = no band).
     shelf_band: Option<Pos2>,
     shelf_band_now: Option<Pos2>,
     shelf_band_add: bool,
     shelf_band_armed: bool,
     shelf_band_base: Vec<Uuid>,
-    /// Glisser des dos vers le panier.
+    /// Dragging spines toward the basket.
     shelf_haul: Option<Pos2>,
     shelf_haul_now: Option<Pos2>,
     shelf_haul_ids: Vec<Uuid>,
     shelf_haul_armed: bool,
+    /// Grid cell index while dragging.
+    shelf_drop: Option<usize>,
+    /// Every cell (occupied or empty).
+    shelf_grid: Vec<Rect>,
     shelf_toss: Vec<Toss>,
     trash_rect: Rect,
     trash_mouth: Pos2,
@@ -163,6 +190,7 @@ impl CahierApp {
         seed::seed_if_needed(&mut lib);
         let width = default_width(Nib::Fineliner);
         let dock_edge = lib.index.dock;
+        let ink0 = look.inks.first().copied().unwrap_or(look.ink);
         let mut app = Self {
             look,
             lib,
@@ -172,6 +200,10 @@ impl CahierApp {
             note: None,
             tool: Tool::Fineliner,
             color_i: 0,
+            ink: ink0,
+            color_custom: false,
+            tin_open: false,
+            tin_hue: 0.0,
             width,
             last_ink: Tool::Fineliner,
             last_ink_width: width,
@@ -182,6 +214,9 @@ impl CahierApp {
             camera: Camera::default(),
             undo: UndoStack::default(),
             live: None,
+            shape_anchor: None,
+            shape_still: None,
+            shape_preview: None,
             lasso: Vec::new(),
             sel: Vec::new(),
             drag_last: None,
@@ -202,16 +237,20 @@ impl CahierApp {
             dock_grab: Vec2::ZERO,
             dock_moved: false,
             canvas_rect: Rect::ZERO,
+            tab_held: false,
             tablet: TabletBridge::new(),
             live_from_pen: false,
-            prox_flipped: false,
             cursor_off: false,
             pen_was_prox: false,
             emoji_pick: None,
             emoji_query: String::new(),
             rename_id: None,
             rename_buf: String::new(),
+            rename_rect: None,
             text_focus: false,
+            palette_open: false,
+            pen_ui_grab: false,
+            pending_image: None,
             shelf_sel: Vec::new(),
             shelf_anchor: None,
             shelf_trash: false,
@@ -225,6 +264,8 @@ impl CahierApp {
             shelf_haul_now: None,
             shelf_haul_ids: Vec::new(),
             shelf_haul_armed: false,
+            shelf_drop: None,
+            shelf_grid: Vec::new(),
             shelf_toss: Vec::new(),
             trash_rect: Rect::NOTHING,
             trash_mouth: Pos2::ZERO,
@@ -257,9 +298,32 @@ impl CahierApp {
 
     fn ink_color(&self) -> Color32 {
         if self.tool == Tool::Highlighter {
-            self.look.highs[self.color_i % self.look.highs.len()]
+            Color32::from_rgba_unmultiplied(self.ink.r(), self.ink.g(), self.ink.b(), 90)
         } else {
-            self.look.inks[self.color_i % self.look.inks.len()]
+            Color32::from_rgb(self.ink.r(), self.ink.g(), self.ink.b())
+        }
+    }
+
+    fn pick_theme_ink(&mut self, i: usize) {
+        self.color_custom = false;
+        self.color_i = i;
+        if self.tool == Tool::Highlighter {
+            let n = self.look.highs.len().max(1);
+            let c = self.look.highs[i % n];
+            self.ink = Color32::from_rgb(c.r(), c.g(), c.b());
+        } else {
+            let n = self.look.inks.len().saturating_sub(1).max(1);
+            self.ink = self.look.inks[i % n];
+        }
+        self.tin_hue = rgb_to_hsv(self.ink).0;
+    }
+
+    fn pick_free_ink(&mut self, c: Color32) {
+        self.color_custom = true;
+        self.ink = Color32::from_rgb(c.r(), c.g(), c.b());
+        let (h, s, _) = rgb_to_hsv(self.ink);
+        if s > 0.04 {
+            self.tin_hue = h;
         }
     }
 
@@ -288,7 +352,7 @@ impl CahierApp {
         Camera::fit_zoom(rect, pw, ph)
     }
 
-    /// 100 = feuille collée à l’écran.
+    /// 100 = the sheet fills the screen.
     fn zoom_percent(&self) -> i32 {
         let fit = self.fit_zoom_now();
         ((self.camera.zoom / fit.max(0.001)) * 100.0).round() as i32
@@ -333,17 +397,6 @@ impl CahierApp {
         self.need_fit = true;
     }
 
-    fn add_page(&mut self) {
-        self.push_snapshot();
-        let next = self.note.as_ref().map(|n| n.pages.len()).unwrap_or(0);
-        if let Some(n) = &mut self.note {
-            n.add_page();
-            self.mark_dirty();
-            self.land_page = Some(next);
-            self.need_fit = false;
-        }
-    }
-
     fn mark_dirty(&mut self) {
         self.dirty = true;
         self.last_change = Instant::now();
@@ -367,24 +420,20 @@ impl CahierApp {
 
     fn open_note(&mut self, id: Uuid) {
         self.autosave();
-        if let Some(mut n) = self.lib.load_note(id) {
-            let sheet = (n.page_w - PAGE_W).abs() > 0.5 || (n.page_h - PAGE_H).abs() > 0.5;
-            n.page_w = PAGE_W;
-            n.page_h = PAGE_H;
+        if let Some(n) = self.lib.load_note(id) {
             self.title_buf = n.title.clone();
             self.note = Some(n);
             self.scene = Scene::Desk;
             self.undo.clear();
             self.sel.clear();
             self.live = None;
+            self.clear_shape_hold();
             self.lasso.clear();
             self.editing_text = None;
             self.need_fit = false;
             self.land_page = Some(0);
             self.textures.clear();
-            if sheet {
-                self.mark_dirty();
-            }
+            self.tab_held = false;
         }
     }
 
@@ -450,7 +499,7 @@ impl CahierApp {
         }
     }
 
-    /// Choisit une gomme ; re-tap sur la même = retour à l’encre.
+    /// Picks an eraser; tapping the same one again returns to ink.
     fn pick_eraser(&mut self, kind: Tool) {
         if !kind.is_eraser() {
             return;
@@ -465,20 +514,29 @@ impl CahierApp {
         }
     }
 
-    fn mode(&self) -> NoteMode {
-        self.lib.index.mode
-    }
-
     fn is_tablette(&self) -> bool {
-        self.mode().is_tablette()
+        self.palm_guard(&self.tablet.snapshot())
     }
 
     fn slot(&self) -> f32 {
-        if self.is_tablette() {
-            48.0
+        44.0
+    }
+
+    fn chrome_btn(&self) -> f32 {
+        44.0
+    }
+
+    fn drop_spot(&self) -> (usize, Pos2) {
+        let rect = self.canvas_rect;
+        let paper = if rect.width() > 10.0 {
+            self.camera.to_paper(rect.center(), rect)
         } else {
-            40.0
-        }
+            pos2(80.0, 80.0)
+        };
+        let n = self.note.as_ref().map(|n| n.pages.len()).unwrap_or(1);
+        let page = page_at_y(paper.y, n, self.ph());
+        let local = paper - page_origin(page, self.ph());
+        (page, local)
     }
 
     fn finish_text_edit(&mut self) {
@@ -501,18 +559,6 @@ impl CahierApp {
             }
             self.mark_dirty();
         }
-    }
-
-    fn set_mode(&mut self, mode: NoteMode) {
-        if self.lib.index.mode == mode {
-            return;
-        }
-        self.lib.index.mode = mode;
-        self.lib.save_index();
-    }
-
-    fn toggle_mode(&mut self) {
-        self.set_mode(self.mode().other());
     }
 
     fn tool_hover(&self, tool: Tool) -> String {
@@ -548,10 +594,6 @@ impl eframe::App for CahierApp {
 
     fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
         self.tablet.ensure(frame);
-        // Première attach : repaint pour que le hook lise les events au prochain tour.
-        if self.tablet.ready() && !self.tablet.wants_repaint() {
-            // no-op — wants_repaint couvre proximité
-        }
         let pen = self.tablet.snapshot();
         if let Some(p) = pen.pressure {
             self.pressure.push_touch(p);
@@ -560,14 +602,6 @@ impl eframe::App for CahierApp {
         }
         if pen.in_proximity {
             self.palm_grace_until = Some(Instant::now() + Duration::from_millis(180));
-            if matches!(self.scene, Scene::Desk) && !self.prox_flipped && !self.is_tablette() {
-                self.set_mode(NoteMode::Tablette);
-                self.prox_flipped = true;
-                let t = ctx.input(|i| i.time);
-                self.toast(NoteMode::Tablette.hint(), t);
-            }
-        } else {
-            self.prox_flipped = false;
         }
         if matches!(self.scene, Scene::Desk) && pen.air_toggle {
             self.toggle_eraser();
@@ -577,6 +611,9 @@ impl eframe::App for CahierApp {
             if next.stamp != self.look.stamp {
                 let label = next.name.clone();
                 self.look = next;
+                if !self.color_custom {
+                    self.pick_theme_ink(self.color_i);
+                }
                 self.look.apply(ctx);
                 crate::fonts::install(ctx);
                 let t = ctx.input(|i| i.time);
@@ -679,16 +716,17 @@ impl CahierApp {
         let mut close = false;
         let mut delete_sel = false;
         let mut dup = false;
-        let mut add_page = false;
         let mut width_delta: f32 = 0.0;
         let mut tool: Option<Tool> = None;
         let mut color: Option<usize> = None;
         let mut cycle_paper = false;
         let mut erase_pick: Option<Tool> = None;
         let mut toggle_fiche = false;
-        let mut toggle_mode = false;
 
-        let typing = ctx.wants_keyboard_input() || self.editing_text.is_some();
+        let typing = ctx.wants_keyboard_input()
+            || self.editing_text.is_some()
+            || self.rename_id.is_some()
+            || self.emoji_pick.is_some();
         ctx.input(|i| {
             let c = i.modifiers.command;
             let sh = i.modifiers.shift;
@@ -727,9 +765,6 @@ impl CahierApp {
             }
             if c && i.key_pressed(Key::D) {
                 dup = true;
-            }
-            if c && i.key_pressed(Key::Enter) {
-                add_page = true;
             }
             if i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace) {
                 if self.editing_text.is_none() {
@@ -774,9 +809,6 @@ impl CahierApp {
                 if i.key_pressed(Key::M) {
                     cycle_paper = true;
                 }
-                if i.key_pressed(Key::K) {
-                    toggle_mode = true;
-                }
                 for (k, idx) in [
                     (Key::Num1, 0),
                     (Key::Num2, 1),
@@ -795,7 +827,7 @@ impl CahierApp {
             }
             if !c {
                 if let Scene::Shelf { .. } = self.scene {
-                    if i.key_pressed(Key::N) {
+                    if !typing && i.key_pressed(Key::N) {
                         new_note = true;
                     }
                     if !typing && (i.key_pressed(Key::Slash) || i.key_pressed(Key::F1)) {
@@ -876,9 +908,6 @@ impl CahierApp {
             if dup {
                 self.duplicate_selection();
             }
-            if add_page {
-                self.add_page();
-            }
             if width_delta != 0.0 {
                 self.width = (self.width + width_delta).clamp(0.8, 48.0);
                 if self.tool.is_ink() {
@@ -900,9 +929,12 @@ impl CahierApp {
                 if let Some(nib) = t.nib() {
                     self.width = default_width(nib);
                 }
+                if t == Tool::Image {
+                    self.pending_image = Some(self.drop_spot());
+                }
             }
             if let Some(i) = color {
-                self.color_i = i;
+                self.pick_theme_ink(i);
             }
             if cycle_paper {
                 if let Some(n) = &mut self.note {
@@ -914,13 +946,6 @@ impl CahierApp {
         if toggle_fiche {
             self.lib.index.fiche_pliee = !self.lib.index.fiche_pliee;
             self.lib.save_index();
-        }
-        if toggle_mode {
-            if let Scene::Desk = self.scene {
-                self.toggle_mode();
-                let t = ctx.input(|i| i.time);
-                self.toast(self.mode().hint(), t);
-            }
         }
     }
 
@@ -1009,7 +1034,7 @@ impl CahierApp {
     }
 
     fn ui_shelf(&mut self, ctx: &Context) {
-        // Raccourcis étagère (sélection / corbeille)
+        // Shelf shortcuts (selection / trash)
         if self.emoji_pick.is_none() && self.rename_id.is_none() {
             self.shelf_keys(ctx);
             self.shelf_pointer_tick(ctx);
@@ -1021,7 +1046,7 @@ impl CahierApp {
 
         let in_bin = self.shelf_trash;
         let room = if in_bin {
-            mix_col(self.look.desk, self.look.rust(), 0.14)
+            mix_col(self.look.desk, self.look.rust(), 0.18)
         } else {
             self.look.desk
         };
@@ -1034,27 +1059,10 @@ impl CahierApp {
                     ui.horizontal(|ui| {
                         ui.add_space(28.0);
                         ui.label(
-                            RichText::new("Corbeille")
-                                .font(self.look.serif(18.0))
+                            RichText::new("Trash")
+                                .font(self.look.serif(20.0))
                                 .color(self.look.fg_dim),
                         );
-                        ui.add_space(12.0);
-                        if !self.lib.index.trash.is_empty()
-                            && ui
-                                .add(
-                                    Label::new(
-                                        RichText::new("vider")
-                                            .font(self.look.mono(12.0))
-                                            .color(self.look.rust()),
-                                    )
-                                    .sense(Sense::click()),
-                                )
-                                .on_hover_cursor(CursorIcon::PointingHand)
-                                .clicked()
-                        {
-                            self.lib.empty_trash();
-                            self.shelf_sel.clear();
-                        }
                     });
                 }
                 ui.add_space(if self.shelf_trash { 12.0 } else { 28.0 });
@@ -1074,122 +1082,126 @@ impl CahierApp {
                     .filter(|m| !self.shelf_toss.iter().any(|t| t.id == m.id))
                     .collect();
 
-                // Clic dans le vide : désélection
-                let bg = ui.interact(
-                    ui.max_rect(),
-                    Id::new("shelf-bg"),
-                    Sense::click(),
-                );
-                if bg.clicked() && !ui.input(|i| i.modifiers.command || i.modifiers.shift) {
-                    // ne clear que si le clic n'est pas sur un dos (les dos prennent le focus après)
-                }
-
-                if notes.is_empty() {
+                if self.shelf_trash && notes.is_empty() {
                     self.shelf_slots.clear();
+                    self.shelf_grid.clear();
                     ui.add_space(48.0);
                     ui.horizontal(|ui| {
                         ui.add_space(28.0);
-                        let empty = if self.shelf_trash {
-                            "Vide"
-                        } else {
-                            "No notes yet"
-                        };
                         ui.label(
-                            RichText::new(empty)
+                            RichText::new("Empty")
                                 .font(self.look.serif(22.0))
                                 .color(self.look.fg_dim),
                         );
                     });
                 } else {
                     let mut open = None;
-                    let mut del = None;
-                    let mut dup = None;
-                    let mut pin = None;
-                    let mut emoji_for = None;
-                    let mut rename_for = None;
-                    let mut restore = None;
                     let mut select = None;
                     let mut toggle = None;
                     let mut range = None;
-                    let ids: Vec<Uuid> = notes.iter().map(|n| n.id).collect();
+                    let ids: Vec<Uuid> = {
+                        let mut v = notes.clone();
+                        if !self.shelf_trash && query.is_empty() {
+                            v.sort_by_key(|n| n.slot);
+                        }
+                        v.into_iter().map(|n| n.id).collect()
+                    };
                     self.shelf_slots.clear();
+                    self.shelf_grid.clear();
+                    let querying = !query.is_empty();
+                    let shifting = self.shelf_haul_armed && !self.shelf_trash && !querying;
+                    let packed = self.shelf_trash || querying;
 
                     ScrollArea::vertical().show(ui, |ui| {
                         ui.add_space(4.0);
-                        let available = ui.available_width() - 48.0;
-                        let card_w = DOS_W + DOS_PAD * 2.0;
-                        let gap = 6.0;
-                        let cols = ((available + gap) / (card_w + gap)).floor().max(1.0) as usize;
-                        let mut i = 0;
-                        while i < notes.len() {
-                            ui.horizontal(|ui| {
-                                ui.add_space(28.0);
-                                for _ in 0..cols {
-                                    if i >= notes.len() {
-                                        break;
-                                    }
-                                    let meta = notes[i].clone();
-                                    i += 1;
+                        let left = 28.0;
+                        let slot = Self::shelf_slot();
+                        let pitch = vec2(slot.x + SHELF_GAP, slot.y + SHELF_GAP);
+                        let (cols, rows) = if packed {
+                            let available = ui.available_width() - left;
+                            let cols = ((available + SHELF_GAP) / pitch.x).floor().max(1.0) as usize;
+                            let rows = (notes.len().max(1) + cols - 1) / cols;
+                            (cols, rows.max(1))
+                        } else {
+                            (SHELF_COLS as usize, SHELF_ROWS as usize)
+                        };
+                        let n_cells = if packed {
+                            rows * cols
+                        } else {
+                            SHELF_SLOTS as usize
+                        };
+                        let grid = vec2(left + cols as f32 * pitch.x, rows as f32 * pitch.y);
+                        let (full, _) = ui.allocate_exact_size(grid, Sense::hover());
+                        let origin = pos2(full.min.x + left, full.min.y);
+                        let occ: HashMap<u32, crate::library::NoteMeta> = if packed {
+                            HashMap::new()
+                        } else {
+                            notes.iter().map(|m| (m.slot, m.clone())).collect()
+                        };
+                        for idx in 0..n_cells {
+                            let col = idx % cols;
+                            let row = idx / cols;
+                            let cell = Rect::from_min_size(
+                                origin + vec2(col as f32 * pitch.x, row as f32 * pitch.y),
+                                slot,
+                            );
+                            self.shelf_grid.push(cell);
+                            let meta = if packed {
+                                notes.get(idx).cloned()
+                            } else {
+                                occ.get(&(idx as u32)).cloned()
+                            };
+                            let lifted = meta
+                                .as_ref()
+                                .map(|m| shifting && self.shelf_haul_ids.contains(&m.id))
+                                .unwrap_or(false);
+                            let hot = shifting && self.shelf_drop == Some(idx);
+                            if let Some(meta) = meta.filter(|_| !lifted) {
+                                ui.scope_builder(UiBuilder::new().max_rect(cell), |ui| {
                                     let selected = self.shelf_sel.contains(&meta.id);
                                     match self.cahier_dos(ui, &meta, selected) {
                                         Some(DosAct::Open) => open = Some(meta.id),
-                                        Some(DosAct::Dup) => dup = Some(meta.id),
-                                        Some(DosAct::Pin) => pin = Some(meta.id),
-                                        Some(DosAct::Del) => del = Some(meta.id),
-                                        Some(DosAct::Emoji) => emoji_for = Some(meta.id),
-                                        Some(DosAct::Rename) => rename_for = Some(meta.id),
-                                        Some(DosAct::Restore) => restore = Some(meta.id),
                                         Some(DosAct::Select) => select = Some(meta.id),
                                         Some(DosAct::Toggle) => toggle = Some(meta.id),
                                         Some(DosAct::Range) => range = Some(meta.id),
                                         None => {}
                                     }
-                                    ui.add_space(gap);
-                                }
-                            });
-                            ui.add_space(8.0);
+                                });
+                            } else if shifting {
+                                self.place_dos(ui, cell, hot);
+                            }
                         }
                     });
 
                     if !self.shelf_band_armed {
-                    if let Some(id) = select {
-                        self.shelf_sel = vec![id];
-                        self.shelf_anchor = Some(id);
-                    }
-                    if let Some(id) = toggle {
-                        if let Some(p) = self.shelf_sel.iter().position(|x| *x == id) {
-                            self.shelf_sel.remove(p);
-                        } else {
-                            self.shelf_sel.push(id);
-                        }
-                        self.shelf_anchor = Some(id);
-                    }
-                    if let Some(id) = range {
-                        let anchor = self.shelf_anchor.or_else(|| self.shelf_sel.last().copied());
-                        if let Some(a) = anchor {
-                            if let (Some(ia), Some(ib)) = (
-                                ids.iter().position(|x| *x == a),
-                                ids.iter().position(|x| *x == id),
-                            ) {
-                                let (lo, hi) = if ia <= ib { (ia, ib) } else { (ib, ia) };
-                                self.shelf_sel = ids[lo..=hi].to_vec();
-                            }
-                        } else {
+                        if let Some(id) = select {
                             self.shelf_sel = vec![id];
                             self.shelf_anchor = Some(id);
                         }
-                    }
-                    }
-                    if let Some(id) = emoji_for {
-                        self.emoji_pick = Some(id);
-                        self.rename_id = None;
-                    }
-                    if let Some(id) = rename_for {
-                        if let Some(m) = self.lib.index.notes.iter().find(|n| n.id == id) {
-                            self.rename_buf = m.title.clone();
+                        if let Some(id) = toggle {
+                            if let Some(p) = self.shelf_sel.iter().position(|x| *x == id) {
+                                self.shelf_sel.remove(p);
+                            } else {
+                                self.shelf_sel.push(id);
+                            }
+                            self.shelf_anchor = Some(id);
                         }
-                        self.rename_id = Some(id);
-                        self.emoji_pick = None;
+                        if let Some(id) = range {
+                            let anchor =
+                                self.shelf_anchor.or_else(|| self.shelf_sel.last().copied());
+                            if let Some(a) = anchor {
+                                if let (Some(ia), Some(ib)) = (
+                                    ids.iter().position(|x| *x == a),
+                                    ids.iter().position(|x| *x == id),
+                                ) {
+                                    let (lo, hi) = if ia <= ib { (ia, ib) } else { (ib, ia) };
+                                    self.shelf_sel = ids[lo..=hi].to_vec();
+                                }
+                            } else {
+                                self.shelf_sel = vec![id];
+                                self.shelf_anchor = Some(id);
+                            }
+                        }
                     }
                     if let Some(id) = open {
                         if !self.shelf_trash && !self.shelf_band_armed {
@@ -1197,33 +1209,6 @@ impl CahierApp {
                             self.rename_id = None;
                             self.shelf_sel.clear();
                             self.open_note(id);
-                        }
-                    }
-                    if let Some(id) = dup {
-                        if let Some(n) = self.lib.duplicate(id) {
-                            let nid = n.id;
-                            self.open_note(nid);
-                        }
-                    }
-                    if let Some(id) = pin {
-                        if let Some(mut n) = self.lib.load_note(id) {
-                            n.pinned = !n.pinned;
-                            self.lib.save_note(&n);
-                        }
-                    }
-                    if let Some(id) = restore {
-                        self.lib.restore_note(id);
-                        self.shelf_sel.retain(|x| *x != id);
-                    }
-                    if let Some(id) = del {
-                        if self.shelf_trash {
-                            self.lib.purge_trashed(id);
-                        } else {
-                            self.lib.trash_note(id);
-                        }
-                        self.shelf_sel.retain(|x| *x != id);
-                        if self.rename_id == Some(id) {
-                            self.rename_id = None;
                         }
                     }
                 }
@@ -1246,31 +1231,38 @@ impl CahierApp {
             }
         }
 
-        // Panier à papier — coin du pupitre
+        // Wastebasket — corner of the lectern
         Area::new(Id::new("fab-corbeille"))
             .anchor(Align2::LEFT_BOTTOM, vec2(18.0, -16.0))
             .order(Order::Foreground)
             .show(ctx, |ui| {
-                let n = self.lib.index.trash.len() + self.shelf_toss.len();
-                let hungry = self.shelf_haul_armed
-                    && self
-                        .shelf_haul_now
-                        .is_some_and(|p| self.trash_rect.expand(18.0).contains(p));
-                let resp = self
-                    .wastebasket(ui, self.shelf_trash, n, hungry)
-                    .on_hover_text(if self.shelf_trash {
-                        "Shelf"
-                    } else {
-                        "Trash"
-                    });
-                if resp.clicked() && !self.shelf_fed && !self.shelf_haul_armed {
-                    self.shelf_trash = !self.shelf_trash;
-                    self.shelf_sel.clear();
-                    self.shelf_anchor = None;
-                    if let Scene::Shelf { query } = &mut self.scene {
-                        query.clear();
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing = vec2(10.0, 0.0);
+                    ui.set_height(62.0);
+                    let n = self.lib.index.trash.len() + self.shelf_toss.len();
+                    let hungry = self.shelf_haul_armed
+                        && self
+                            .shelf_haul_now
+                            .is_some_and(|p| self.trash_rect.expand(18.0).contains(p));
+                    let resp = self
+                        .wastebasket(ui, self.shelf_trash, n, hungry)
+                        .on_hover_text(if self.shelf_trash { "Shelf" } else { "Trash" });
+                    if resp.clicked() && !self.shelf_fed && !self.shelf_haul_armed {
+                        self.shelf_trash = !self.shelf_trash;
+                        self.shelf_sel.clear();
+                        self.shelf_anchor = None;
+                        if let Scene::Shelf { query } = &mut self.scene {
+                            query.clear();
+                        }
                     }
-                }
+                    if self.shelf_trash && !self.lib.index.trash.is_empty() {
+                        if self.vider_tag(ui).on_hover_text("Empty all").clicked() {
+                            self.lib.empty_trash();
+                            self.shelf_sel.clear();
+                            self.shelf_fed = true;
+                        }
+                    }
+                });
             });
 
         Area::new(Id::new("shelf-search"))
@@ -1279,8 +1271,7 @@ impl CahierApp {
             .show(ctx, |ui| {
                 if let Scene::Shelf { query } = &mut self.scene {
                     let rail = 168.0;
-                    let search_w = (ctx.screen_rect().width() - rail * 2.0)
-                        .clamp(200.0, 560.0);
+                    let search_w = (ctx.screen_rect().width() - rail * 2.0).clamp(200.0, 560.0);
                     Frame::NONE
                         .fill(self.look.desk_deep)
                         .corner_radius(22)
@@ -1290,7 +1281,8 @@ impl CahierApp {
                             let te = TextEdit::singleline(query)
                                 .hint_text("Search")
                                 .font(self.look.mono(15.0))
-                                .frame(false);
+                                .frame(false)
+                                .id(Id::new("shelf-search-field"));
                             ui.add(te);
                         });
                 }
@@ -1301,11 +1293,11 @@ impl CahierApp {
             .anchor(Align2::RIGHT_TOP, vec2(-16.0, 10.0))
             .order(Order::Foreground)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(10.0, 0.0);
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
                     if self
                         .help_signet(ui, fiche_ouverte)
-                        .on_hover_text(if fiche_ouverte { "Tuck away" } else { "Help" })
+                        .on_hover_text(if fiche_ouverte { "Fold" } else { "Help" })
                         .clicked()
                     {
                         self.lib.index.fiche_pliee = !self.lib.index.fiche_pliee;
@@ -1319,96 +1311,16 @@ impl CahierApp {
                 });
             });
 
-        // Barre d'actions si sélection
-        if !self.shelf_sel.is_empty() && self.emoji_pick.is_none() {
-            let n = self.shelf_sel.len();
-            Area::new(Id::new("shelf-sel-bar"))
-                .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -28.0))
-                .order(Order::Foreground)
-                .show(ctx, |ui| {
-                    Frame::NONE
-                        .fill(self.look.desk_deep)
-                        .stroke(Stroke::new(1.0_f32, self.look.desk_edge))
-                        .corner_radius(18)
-                        .inner_margin(Margin::symmetric(16, 10))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(format!("{n} selected"))
-                                        .font(self.look.mono(12.0))
-                                        .color(self.look.fg),
-                                );
-                                ui.add_space(14.0);
-                                if self.shelf_trash {
-                                    if ui
-                                        .add(
-                                            Label::new(
-                                                RichText::new("restore")
-                                                    .font(self.look.mono(12.0))
-                                                    .color(self.look.accent),
-                                            )
-                                            .sense(Sense::click()),
-                                        )
-                                        .clicked()
-                                    {
-                                        for id in self.shelf_sel.clone() {
-                                            self.lib.restore_note(id);
-                                        }
-                                        self.shelf_sel.clear();
-                                    }
-                                    ui.add_space(10.0);
-                                    if ui
-                                        .add(
-                                            Label::new(
-                                                RichText::new("delete")
-                                                    .font(self.look.mono(12.0))
-                                                    .color(
-                                                        self.look
-                                                            .inks
-                                                            .get(2)
-                                                            .copied()
-                                                            .unwrap_or(self.look.accent),
-                                                    ),
-                                            )
-                                            .sense(Sense::click()),
-                                        )
-                                        .clicked()
-                                    {
-                                        for id in self.shelf_sel.clone() {
-                                            self.lib.purge_trashed(id);
-                                        }
-                                        self.shelf_sel.clear();
-                                    }
-                                } else if ui
-                                    .add(
-                                        Label::new(
-                                            RichText::new("trash")
-                                                .font(self.look.mono(12.0))
-                                                .color(self.look.rust()),
-                                        )
-                                        .sense(Sense::click()),
-                                    )
-                                    .clicked()
-                                {
-                                    for id in self.shelf_sel.clone() {
-                                        self.lib.trash_note(id);
-                                    }
-                                    self.shelf_sel.clear();
-                                }
-                            });
-                        });
-                });
-        }
-
-        if fiche_ouverte && !self.shelf_trash {
+        if fiche_ouverte {
             Area::new(Id::new("shelf-tuto-fiche"))
-                .anchor(Align2::RIGHT_TOP, vec2(-16.0, 88.0))
+                .anchor(Align2::RIGHT_TOP, vec2(-16.0, 74.0))
                 .order(Order::Foreground)
                 .show(ctx, |ui| {
                     self.fiche_pupitre(ui);
                 });
         }
         self.paint_shelf_haul(ctx);
+        self.shelf_rename_field(ctx);
         if let Some(id) = self.emoji_pick {
             self.ui_emoji_picker(ctx, id);
         }
@@ -1421,11 +1333,15 @@ impl CahierApp {
     }
 
     fn shelf_keys(&mut self, ctx: &Context) {
-        let typing = ctx.wants_keyboard_input();
+        let typing =
+            ctx.wants_keyboard_input() || self.rename_id.is_some() || self.emoji_pick.is_some();
         let mut clear = false;
         let mut trash_sel = false;
         let mut select_all = false;
         let mut open_one = false;
+        let mut pin = false;
+        let mut mark = false;
+        let mut restore = false;
         ctx.input(|i| {
             if i.key_pressed(Key::Escape) {
                 clear = true;
@@ -1438,6 +1354,15 @@ impl CahierApp {
             }
             if !typing && i.key_pressed(Key::Enter) && self.shelf_sel.len() == 1 {
                 open_one = true;
+            }
+            if !typing && !i.modifiers.command && i.key_pressed(Key::P) {
+                pin = true;
+            }
+            if !typing && !i.modifiers.command && i.key_pressed(Key::E) {
+                mark = true;
+            }
+            if !typing && !i.modifiers.command && i.key_pressed(Key::R) {
+                restore = true;
             }
         });
         if clear {
@@ -1456,18 +1381,49 @@ impl CahierApp {
             };
             self.shelf_sel = src.iter().map(|m| m.id).collect();
         }
-        if trash_sel && !self.shelf_sel.is_empty() {
-            let ids = self.shelf_sel.clone();
+        let ids = self.shelf_action_ids(ctx);
+        if trash_sel && !ids.is_empty() {
             if self.shelf_trash {
-                for id in ids {
-                    self.lib.purge_trashed(id);
+                for id in &ids {
+                    self.lib.purge_trashed(*id);
                 }
             } else {
-                for id in ids {
-                    self.lib.trash_note(id);
+                for id in &ids {
+                    self.lib.trash_note(*id);
                 }
             }
-            self.shelf_sel.clear();
+            self.shelf_sel.retain(|id| !ids.contains(id));
+        }
+        if pin && !self.shelf_trash && !ids.is_empty() {
+            let pin_on = ids.iter().any(|id| {
+                self.lib
+                    .index
+                    .notes
+                    .iter()
+                    .find(|m| m.id == *id)
+                    .is_some_and(|m| !m.pinned)
+            });
+            for id in &ids {
+                if let Some(mut note) = self.lib.load_note(*id) {
+                    note.pinned = pin_on;
+                    self.lib.save_note(&note);
+                    if pin_on {
+                        self.lib.bring_front(*id);
+                    }
+                }
+            }
+        }
+        if mark && !self.shelf_trash {
+            if let Some(id) = ids.first().copied() {
+                self.emoji_pick = Some(id);
+                self.rename_id = None;
+            }
+        }
+        if restore && self.shelf_trash {
+            for id in &ids {
+                self.lib.restore_note(*id);
+            }
+            self.shelf_sel.retain(|id| !ids.contains(id));
         }
         if open_one && !self.shelf_trash {
             if let Some(id) = self.shelf_sel.first().copied() {
@@ -1475,6 +1431,20 @@ impl CahierApp {
                 self.open_note(id);
             }
         }
+    }
+
+    fn shelf_action_ids(&self, ctx: &Context) -> Vec<Uuid> {
+        if !self.shelf_sel.is_empty() {
+            return self.shelf_sel.clone();
+        }
+        let Some(pos) = ctx.pointer_hover_pos() else {
+            return Vec::new();
+        };
+        self.shelf_slots
+            .iter()
+            .find(|(_, r)| r.contains(pos))
+            .map(|(id, _)| vec![*id])
+            .unwrap_or_default()
     }
 
     fn shelf_pointer_tick(&mut self, ctx: &Context) {
@@ -1496,12 +1466,15 @@ impl CahierApp {
                 self.shelf_haul = None;
                 self.shelf_haul_now = None;
                 self.shelf_haul_armed = false;
+                self.shelf_haul_ids.clear();
+                self.shelf_drop = None;
             }
             return;
         };
         let screen = ctx.screen_rect();
         let chrome = pos.y < screen.min.y + 76.0 || pos.x < screen.min.x + 12.0;
         let on_trash = self.trash_rect.expand(12.0).contains(pos);
+        let querying = matches!(&self.scene, Scene::Shelf { query } if !query.trim().is_empty());
         let hit = self
             .shelf_slots
             .iter()
@@ -1514,6 +1487,7 @@ impl CahierApp {
                     self.shelf_haul = Some(pos);
                     self.shelf_haul_now = Some(pos);
                     self.shelf_haul_armed = false;
+                    self.shelf_drop = None;
                     self.shelf_haul_ids = if self.shelf_sel.contains(&id) {
                         self.shelf_sel.clone()
                     } else {
@@ -1545,6 +1519,14 @@ impl CahierApp {
                             self.shelf_anchor = Some(id);
                         }
                     }
+                    if !self.shelf_trash && !querying {
+                        self.shelf_drop = self.haul_insert_index(pos);
+                    }
+                    ctx.set_cursor_icon(if on_trash {
+                        CursorIcon::Move
+                    } else {
+                        CursorIcon::Grabbing
+                    });
                     ctx.request_repaint();
                 }
             } else if let Some(origin) = self.shelf_band {
@@ -1584,15 +1566,32 @@ impl CahierApp {
                 if over && !self.shelf_trash {
                     self.begin_toss(ctx.input(|i| i.time));
                     self.shelf_fed = true;
+                } else if !self.shelf_trash && !querying {
+                    if let Some(cell) = self.shelf_drop {
+                        let mut ids = self.shelf_haul_ids.clone();
+                        ids.sort_by_key(|id| {
+                            self.lib
+                                .index
+                                .notes
+                                .iter()
+                                .find(|n| n.id == *id)
+                                .map(|n| n.slot)
+                                .unwrap_or(u32::MAX)
+                        });
+                        self.lib.place_at(&ids, cell as u32);
+                        self.shelf_fed = true;
+                    }
                 }
                 self.shelf_haul = None;
                 self.shelf_haul_now = None;
                 self.shelf_haul_armed = false;
                 self.shelf_haul_ids.clear();
+                self.shelf_drop = None;
             } else if self.shelf_haul.is_some() {
                 self.shelf_haul = None;
                 self.shelf_haul_now = None;
                 self.shelf_haul_ids.clear();
+                self.shelf_drop = None;
             }
             if !self.shelf_band_armed {
                 if let Some(origin) = self.shelf_band {
@@ -1608,17 +1607,30 @@ impl CahierApp {
         }
     }
 
+    fn haul_insert_index(&self, pos: Pos2) -> Option<usize> {
+        if self.shelf_grid.is_empty() {
+            return None;
+        }
+        if let Some(i) = self.shelf_grid.iter().position(|r| r.contains(pos)) {
+            return Some(i);
+        }
+        self.shelf_grid
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                a.center()
+                    .distance_sq(pos)
+                    .partial_cmp(&b.center().distance_sq(pos))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i)
+    }
+
     fn begin_toss(&mut self, now: f64) {
         let from = self.shelf_haul_now.unwrap_or(self.trash_mouth);
         let ids = self.shelf_haul_ids.clone();
         for (i, id) in ids.iter().enumerate() {
-            let meta = self
-                .lib
-                .index
-                .notes
-                .iter()
-                .find(|m| m.id == *id)
-                .cloned();
+            let meta = self.lib.index.notes.iter().find(|m| m.id == *id).cloned();
             let Some(meta) = meta else {
                 continue;
             };
@@ -1656,26 +1668,23 @@ impl CahierApp {
     }
 
     fn wastebasket(&mut self, ui: &mut Ui, open: bool, count: usize, hungry: bool) -> Response {
-        let hit = 52.0;
+        let hit = 62.0;
         let (rect, resp) = ui.allocate_exact_size(vec2(hit, hit), Sense::click());
         self.trash_rect = rect;
         let id = Id::new("waste-basket");
-        let hover_t = ui.ctx().animate_bool_with_time(
-            id.with("h"),
-            resp.hovered() || hungry || open,
-            0.16,
-        );
+        let hover_t =
+            ui.ctx()
+                .animate_bool_with_time(id.with("h"), resp.hovered() || hungry || open, 0.16);
         let e = hover_t * hover_t * (3.0 - 2.0 * hover_t);
-        let rust = self.look.rust();
-        let col = if open || hungry || count > 0 {
-            shade_rgb(rust, 1.1 + 0.08 * e)
+        let rust = if open || hungry || count > 0 {
+            shade_rgb(self.look.rust(), 1.12)
         } else {
-            rust
+            self.look.rust()
         };
-        let side = 34.0 + e * 3.0;
-        let icon = Rect::from_center_size(rect.center(), vec2(side, side));
-        self.trash_mouth = pos2(icon.center().x, icon.min.y + side * 0.28);
-        let tex = self.trash_icon(ui.ctx(), col);
+        let side = 52.0 + e * 3.0;
+        let icon = Rect::from_center_size(rect.center() + vec2(0.0, 2.0 - e), vec2(side, side));
+        self.trash_mouth = pos2(icon.center().x, icon.min.y + side * 0.20);
+        let tex = self.trash_svg(ui.ctx(), rust, side);
         ui.painter().image(
             tex.id(),
             icon,
@@ -1689,13 +1698,28 @@ impl CahierApp {
         })
     }
 
-    fn trash_icon(&mut self, ctx: &Context, color: Color32) -> TextureHandle {
-        let key = format!("icon-trash-{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
+    fn trash_svg(&mut self, ctx: &Context, rust: Color32, side: f32) -> TextureHandle {
+        let px = ((side * ctx.pixels_per_point() * 2.0).round() as u32).clamp(128, 256);
+        let key = format!(
+            "svg-trash-{px}-{:02x}{:02x}{:02x}",
+            rust.r(),
+            rust.g(),
+            rust.b()
+        );
         if let Some(tex) = self.textures.get(&key) {
             return tex.clone();
         }
-        let img = raster_lucide_trash(color, 128);
-        let tex = ctx.load_texture(&key, img, TextureOptions::LINEAR);
+        let img = raster_trash_svg(rust, px);
+        let tex = ctx.load_texture(
+            &key,
+            img,
+            TextureOptions {
+                magnification: TextureFilter::Linear,
+                minification: TextureFilter::Linear,
+                wrap_mode: TextureWrapMode::ClampToEdge,
+                mipmap_mode: Some(TextureFilter::Linear),
+            },
+        );
         self.textures.insert(key, tex.clone());
         tex
     }
@@ -1755,6 +1779,77 @@ impl CahierApp {
         let _ = paper;
     }
 
+    fn shelf_rename_field(&mut self, ctx: &Context) {
+        let Some(id) = self.rename_id else {
+            self.rename_rect = None;
+            return;
+        };
+        let Some(rect) = self.rename_rect else {
+            return;
+        };
+        let mut commit = false;
+        let mut cancel = false;
+        Area::new(Id::new("shelf-rename").with(id))
+            .fixed_pos(rect.min)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_min_size(rect.size());
+                ui.set_max_size(rect.size());
+                ui.visuals_mut().override_text_color = Some(self.look.fg);
+                ui.visuals_mut().widgets.inactive.bg_fill = Color32::TRANSPARENT;
+                ui.visuals_mut().widgets.hovered.bg_fill = Color32::TRANSPARENT;
+                ui.visuals_mut().widgets.active.bg_fill = Color32::TRANSPARENT;
+                ui.visuals_mut().widgets.open.bg_fill = Color32::TRANSPARENT;
+                ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::NONE;
+                ui.visuals_mut().widgets.hovered.bg_stroke = Stroke::NONE;
+                ui.visuals_mut().widgets.active.bg_stroke = Stroke::NONE;
+                ui.visuals_mut().widgets.open.bg_stroke = Stroke::NONE;
+                let te = TextEdit::singleline(&mut self.rename_buf)
+                    .font(self.look.serif(18.0))
+                    .text_color(self.look.fg)
+                    .desired_width(rect.width())
+                    .frame(false)
+                    .margin(Margin::ZERO)
+                    .horizontal_align(Align::Center)
+                    .vertical_align(Align::Center)
+                    .id(Id::new("shelf-rename-edit").with(id));
+                let r = ui.add_sized(rect.size(), te);
+                let armed = Id::new("shelf-rename-armed").with(id);
+                let already = ui
+                    .ctx()
+                    .data(|d| d.get_temp::<bool>(armed).unwrap_or(false));
+                if !already {
+                    r.request_focus();
+                    ui.ctx().data_mut(|d| d.insert_temp(armed, true));
+                }
+                if r.lost_focus() {
+                    ui.ctx().data_mut(|d| d.remove::<bool>(armed));
+                    if ui.input(|i| i.key_pressed(Key::Escape)) {
+                        cancel = true;
+                    } else {
+                        commit = true;
+                    }
+                } else if r.has_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    commit = true;
+                }
+            });
+        if commit {
+            let title = self.rename_buf.trim().to_string();
+            if !title.is_empty() {
+                if let Some(mut n) = self.lib.load_note(id) {
+                    n.title = title;
+                    n.touch();
+                    self.lib.save_note(&n);
+                }
+            }
+            self.rename_id = None;
+            self.rename_rect = None;
+        } else if cancel {
+            self.rename_id = None;
+            self.rename_rect = None;
+        }
+    }
+
     fn paint_shelf_haul(&mut self, ctx: &Context) {
         let now = ctx.input(|i| i.time);
         let mut ghosts: Vec<(Pos2, f32, f32, u8, String)> = Vec::new();
@@ -1807,134 +1902,90 @@ impl CahierApp {
             });
     }
 
-    /// Signet de la fiche : papier, cran en V, astérisque de marge.
-    /// Signet papier, à droite de la recherche.
-    fn help_signet(&self, ui: &mut Ui, open: bool) -> Response {
-        let w = 32.0;
-        let h = 66.0;
-        // Marge à droite pour l'ombre, à gauche pour la penche.
-        let (rect, resp) = ui.allocate_exact_size(vec2(w + 16.0, h + 14.0), Sense::click());
-        let p = ui.painter();
-        let id = Id::new("help-signet");
-        let hover_t = ui
-            .ctx()
-            .animate_bool_with_time(id.with("h"), resp.hovered() || open, 0.2);
-        let e = hover_t * hover_t * (3.0 - 2.0 * hover_t);
-        // La queue part vers la page, pas vers le bord de la fenêtre.
-        let lean = (1.0 - e) * -0.05;
-        let drop = if open { 0.0 } else { e * 5.0 };
-
-        let l = rect.left() + 2.0;
-        let r = l + w;
-        let t = rect.top();
-        let b = t + h;
-        let notch = 11.0;
-        let shoulder = b - notch;
-        let cx = (l + r) * 0.5;
-        let origin = pos2(cx, t);
-
-        let xform = |pt: Pos2| -> Pos2 {
-            let d = pt - origin;
-            let (s, c) = lean.sin_cos();
-            origin + vec2(d.x * c - d.y * s, d.x * s + d.y * c) + vec2(0.0, drop)
-        };
-        let poly = |pts: &[Pos2], color: Color32| {
-            p.add(Shape::convex_polygon(
-                pts.iter().copied().map(xform).collect(),
-                color,
-                Stroke::NONE,
-            ));
-        };
-        let seg = |a: Pos2, b: Pos2, stroke: Stroke| {
-            p.line_segment([xform(a), xform(b)], stroke);
-        };
-
-        let paper = mix_col(self.look.paper, self.look.accent, 0.035);
-        let ink = self.look.ink;
-        let edge = ink.gamma_multiply(0.20);
-        let thread = ink.gamma_multiply(0.28);
-
-        // Le corps s'arrête au-dessus du cran ; les volets le recouvrent.
-        // Sinon le bord du rectangle barre l'entrée du V.
-        let y0 = shoulder - 2.2;
-        let body = [
-            pos2(l, t),
-            pos2(r, t),
-            pos2(r, y0 + 0.8),
-            pos2(l, y0 + 0.8),
-        ];
-        let left_flap = [
-            pos2(l, y0 - 0.8),
-            pos2(cx, y0 - 0.8),
-            pos2(cx, shoulder),
-            pos2(l, b),
-        ];
-        let right_flap = [
-            pos2(cx, y0 - 0.8),
-            pos2(r, y0 - 0.8),
-            pos2(r, b),
-            pos2(cx, shoulder),
-        ];
-
-        for (dx, dy, a) in [(2.2, 4.2, 0.55_f32), (0.8, 1.6, 0.28_f32)] {
-            let sh = |pt: Pos2| xform(pt) + vec2(dx, dy + e * 1.2);
-            let shadow = self.look.shadow.gamma_multiply(a);
-            for pts in [&body[..], &left_flap[..], &right_flap[..]] {
-                p.add(Shape::convex_polygon(
-                    pts.iter().copied().map(sh).collect(),
-                    shadow,
-                    Stroke::NONE,
-                ));
-            }
-        }
-
-        poly(&body, paper);
-        poly(&left_flap, paper);
-        poly(&right_flap, paper);
-
-        let hair = Stroke::new(1.0_f32, edge);
-        seg(pos2(l, t), pos2(r, t), hair);
-        seg(pos2(r, t), pos2(r, b), hair);
-        seg(pos2(r, b), pos2(cx, shoulder), hair);
-        seg(pos2(cx, shoulder), pos2(l, b), hair);
-        seg(pos2(l, b), pos2(l, t), hair);
-
-        // Filet de tête, comme l'en-tête de la fiche.
-        let rule = Stroke::new(1.15_f32, ink.gamma_multiply(0.55));
-        seg(pos2(l + 6.0, t + 9.0), pos2(r - 6.0, t + 9.0), rule);
-        seg(
-            pos2(cx - 6.0, t + 12.4),
-            pos2(cx + 6.0, t + 12.4),
-            Stroke::new(0.8_f32, ink.gamma_multiply(0.28)),
+    fn vider_tag(&self, ui: &mut Ui) -> Response {
+        let size = vec2(108.0, 40.0);
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        let rust = self.look.rust();
+        let paper = mix_col(
+            self.look.paper,
+            rust,
+            if resp.hovered() { 0.12 } else { 0.04 },
         );
-
-        // Trou de ruban : on voit le pupitre au travers.
-        let hole = xform(pos2(cx, t + 20.0));
-        p.circle_filled(hole, 2.15, self.look.desk_deep);
-        p.circle_stroke(hole, 2.15, Stroke::new(0.9_f32, edge));
-
-        // Astérisque de marge — la note, pas un point d'interrogation.
-        let mark = mix_col(ink.gamma_multiply(0.62), self.look.accent, e);
-        let star = xform(pos2(cx, t + 32.0));
-        let arm = 4.6 + e * 0.5;
-        for i in 0..3 {
-            let a = i as f32 * std::f32::consts::FRAC_PI_3;
-            let d = vec2(a.cos(), a.sin()) * arm;
-            p.line_segment([star - d, star + d], Stroke::new(1.05_f32, mark));
-        }
-
-        let dash = Stroke::new(0.9_f32, thread);
-        let mut y = t + 38.0;
-        while y < shoulder - 3.0 {
-            seg(pos2(cx, y), pos2(cx, (y + 3.2).min(shoulder - 2.0)), dash);
-            y += 6.4;
-        }
-
+        let p = ui.painter();
+        p.rect_filled(
+            rect.translate(vec2(1.5, 2.5)),
+            CornerRadius::same(3),
+            self.look.shadow.gamma_multiply(0.28),
+        );
+        p.rect_filled(rect, CornerRadius::same(3), paper);
+        p.rect_stroke(
+            rect,
+            CornerRadius::same(3),
+            Stroke::new(
+                1.15_f32,
+                if resp.hovered() {
+                    rust
+                } else {
+                    rust.gamma_multiply(0.72)
+                },
+            ),
+            StrokeKind::Inside,
+        );
+        let eye = pos2(rect.min.x + 15.0, rect.center().y);
+        let hole = mix_col(self.look.desk, rust, 0.14);
+        p.circle_filled(eye, 5.6, hole);
+        p.circle_stroke(eye, 5.6, Stroke::new(1.0_f32, rust.gamma_multiply(0.55)));
+        p.circle_stroke(eye, 2.2, Stroke::new(0.9_f32, rust.gamma_multiply(0.40)));
+        p.text(
+            pos2(rect.min.x + 28.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            "Empty",
+            self.look.serif(17.0),
+            rust,
+        );
         resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
-    /// Feuille du cahier : même objet pour l'aide et les marques.
+    /// Same well as New, with a question mark in the center.
+    fn help_signet(&self, ui: &mut Ui, open: bool) -> Response {
+        let size = 56.0;
+        let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+        let c = rect.center();
+        let p = ui.painter();
+        let paper = mix_col(self.look.paper, self.look.accent, 0.04);
+        let well = if resp.hovered() || open {
+            mix_col(paper, self.look.accent, 0.08)
+        } else {
+            paper
+        };
+        p.circle_filled(c, 25.0, well);
+        p.circle_stroke(
+            c,
+            25.0,
+            Stroke::new(1.2_f32, self.look.ink.gamma_multiply(0.22)),
+        );
+        p.circle_filled(c, 16.5, mix_col(well, self.look.paper, 0.35));
+        p.circle_stroke(
+            c,
+            16.5,
+            Stroke::new(1.0_f32, self.look.ink.gamma_multiply(0.16)),
+        );
+        p.text(
+            c + vec2(0.0, 1.0),
+            Align2::CENTER_CENTER,
+            "?",
+            self.look.serif(22.0),
+            self.look.ink,
+        );
+        resp.on_hover_cursor(CursorIcon::PointingHand)
+    }
+
+    /// Notebook sheet: the same object for the help card and the marks.
     fn paint_cahier_page(&self, p: &Painter, rect: Rect) -> Rect {
+        self.paint_cahier_leaf(p, rect, 20.0, 18.0)
+    }
+
+    fn paint_cahier_leaf(&self, p: &Painter, rect: Rect, top: f32, bot: f32) -> Rect {
         let paper = mix_col(self.look.paper, self.look.accent, 0.028);
         let ink = self.look.ink;
         p.rect_filled(
@@ -1963,14 +2014,14 @@ impl CahierApp {
         }
         p.line_segment(
             [
-                pos2(rect.min.x + gutter, rect.min.y + 18.0),
-                pos2(rect.min.x + gutter, rect.max.y - 18.0),
+                pos2(rect.min.x + gutter, rect.min.y + top.max(8.0)),
+                pos2(rect.min.x + gutter, rect.max.y - bot.max(8.0)),
             ],
             Stroke::new(1.05_f32, self.look.paper_rule_strong),
         );
         Rect::from_min_max(
-            pos2(rect.min.x + gutter + 18.0, rect.min.y + 20.0),
-            pos2(rect.max.x - 22.0, rect.max.y - 18.0),
+            pos2(rect.min.x + gutter + 16.0, rect.min.y + top),
+            pos2(rect.max.x - 16.0, rect.max.y - bot),
         )
     }
 
@@ -2006,33 +2057,36 @@ impl CahierApp {
         let w = 400.0_f32
             .min(ui.ctx().screen_rect().width() - 40.0)
             .max(300.0);
-        let h = 428.0;
+        let h = 504.0;
         let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
         let p = ui.painter_at(rect);
         let inner = self.paint_cahier_page(&p, rect);
-        let mut y = self.page_head(&p, inner, "Cahier", "les gestes");
+        let mut y = self.page_head(&p, inner, "Cahier", "gestures");
         let ink = self.look.ink;
         let mute = ink.gamma_multiply(0.46);
         let rule = self.look.paper_rule;
 
         let sections: [(&str, &[(&str, &str)]); 2] = [
             (
-                "étagère",
+                "shelf",
                 &[
-                    ("Nouveau", "N"),
-                    ("Ouvrir", "double-clic"),
-                    ("Choisir", "clic · bande"),
-                    ("Corbeille", "glisser"),
-                    ("Icône", "menu"),
+                    ("New", "N"),
+                    ("Open", "double-click"),
+                    ("Select", "click · drag"),
+                    ("Place", "drag"),
+                    ("Pin", "P"),
+                    ("Mark", "E"),
+                    ("Trash", "Del"),
+                    ("Restore", "R"),
                 ],
             ),
             (
-                "pupitre",
+                "lectern",
                 &[
-                    ("Dessiner", "stylet"),
-                    ("Déplacer", "espace"),
-                    ("Effacer", "E"),
-                    ("Annuler", "Ctrl+Z"),
+                    ("Draw", "stylus"),
+                    ("Pan", "space"),
+                    ("Erase", "E"),
+                    ("Undo", "Ctrl+Z"),
                 ],
             ),
         ];
@@ -2071,7 +2125,7 @@ impl CahierApp {
         p.text(
             pos2(inner.center().x, inner.max.y - 2.0),
             Align2::CENTER_BOTTOM,
-            "clic pour replier",
+            "click to fold",
             self.look.mono(10.0),
             mute,
         );
@@ -2081,10 +2135,10 @@ impl CahierApp {
             self.lib.save_index();
         }
         resp.on_hover_cursor(CursorIcon::PointingHand)
-            .on_hover_text("Replier");
+            .on_hover_text("Fold");
     }
 
-    /// Peint une icône couleur dans `bounds`. Faux si la bitmap n'est pas là.
+    /// Paints a color icon into `bounds`. False if the bitmap is missing.
     fn paint_emoji(&mut self, ctx: &Context, painter: &Painter, bounds: Rect, emoji: &str) -> bool {
         let Some(ch) = self.emoji.key(emoji) else {
             return false;
@@ -2115,7 +2169,7 @@ impl CahierApp {
         true
     }
 
-    /// Planche de timbres arrachée d'un catalogue — à détacher et coller sur le dos.
+    /// Same sheet as the help card: pick the mark on the spine.
     fn ui_emoji_picker(&mut self, ctx: &Context, note_id: Uuid) {
         let mut chosen: Option<String> = None;
         let mut dismiss = false;
@@ -2129,7 +2183,12 @@ impl CahierApp {
             .interactable(true)
             .show(ctx, |ui| {
                 let (r, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
-                ui.painter().rect_filled(r, CornerRadius::ZERO, Color32::TRANSPARENT);
+                let d = self.look.desk;
+                ui.painter().rect_filled(
+                    r,
+                    CornerRadius::ZERO,
+                    Color32::from_rgba_unmultiplied(d.r(), d.g(), d.b(), 150),
+                );
                 if resp.clicked() {
                     dismiss = true;
                 }
@@ -2139,87 +2198,27 @@ impl CahierApp {
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .order(Order::Foreground)
             .show(ctx, |ui| {
-                let paper = mix_col(self.look.paper, self.look.accent, 0.03);
+                let paper = mix_col(self.look.paper, self.look.accent, 0.028);
                 let ink = self.look.ink;
                 let mute = ink.gamma_multiply(0.42);
                 let (outer, _sheet_resp) =
                     ui.allocate_exact_size(vec2(sheet_w, sheet_h), Sense::hover());
                 let p = ui.painter_at(outer);
-
-                p.rect_filled(
-                    outer.translate(vec2(5.0, 8.0)),
-                    CornerRadius::same(2),
-                    self.look.shadow.gamma_multiply(0.50),
-                );
-                p.rect_filled(
-                    outer.translate(vec2(2.0, 3.0)),
-                    CornerRadius::same(2),
-                    self.look.shadow.gamma_multiply(0.22),
-                );
-                p.rect_filled(outer, CornerRadius::same(2), paper);
-
-                // Bord arraché à gauche
-                let mut tear = Vec::new();
-                let mut y = outer.min.y;
-                let mut flip = true;
-                tear.push(pos2(outer.min.x + 10.0, outer.min.y));
-                while y < outer.max.y {
-                    y += 7.0;
-                    let x = outer.min.x + if flip { 3.0 } else { 11.0 };
-                    tear.push(pos2(x, y.min(outer.max.y)));
-                    flip = !flip;
-                }
-                for w in tear.windows(2) {
-                    p.line_segment([w[0], w[1]], Stroke::new(1.05_f32, ink.gamma_multiply(0.28)));
-                }
-                p.rect_filled(
-                    Rect::from_min_max(outer.min, pos2(outer.min.x + 2.0, outer.max.y)),
-                    0.0,
-                    self.look.desk,
-                );
-
-                // Coin plié
-                let ear = [
-                    pos2(outer.max.x - 26.0, outer.min.y),
-                    pos2(outer.max.x, outer.min.y),
-                    pos2(outer.max.x, outer.min.y + 26.0),
-                ];
-                p.add(Shape::convex_polygon(
-                    ear.to_vec(),
-                    mix_col(paper, ink, 0.10),
-                    Stroke::NONE,
-                ));
-                p.line_segment(
-                    [ear[0], ear[2]],
-                    Stroke::new(1.0_f32, ink.gamma_multiply(0.16)),
-                );
-
-                p.rect_stroke(
-                    outer,
-                    CornerRadius::same(2),
-                    Stroke::new(1.0_f32, ink.gamma_multiply(0.14)),
-                    StrokeKind::Inside,
-                );
-
-                let inner = outer.shrink2(vec2(22.0, 16.0));
+                let page = self.paint_cahier_page(&p, outer);
+                let y0 = self.page_head(&p, page, "Marks", "on the spine");
+                let inner = Rect::from_min_max(pos2(page.min.x, y0), page.max);
                 ui.scope_builder(UiBuilder::new().max_rect(inner), |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("Icons")
-                                .font(self.look.serif(24.0))
-                                .color(ink),
-                        );
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new("for the spine")
-                                .font(self.look.mono(11.0))
+                            RichText::new("favorites")
+                                .font(self.look.mono(10.0))
                                 .color(mute),
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if ui
                                 .add(
                                     Label::new(
-                                        RichText::new("close")
+                                        RichText::new("fold")
                                             .font(self.look.mono(11.0))
                                             .color(mute),
                                     )
@@ -2231,50 +2230,32 @@ impl CahierApp {
                             }
                         });
                     });
-                    ui.add_space(2.0);
-                    let rule_y = ui.cursor().top();
-                    ui.painter().line_segment(
-                        [pos2(inner.min.x, rule_y), pos2(inner.max.x - 20.0, rule_y)],
-                        Stroke::new(1.2_f32, self.look.accent.gamma_multiply(0.75)),
-                    );
-                    ui.add_space(10.0);
-
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("favorites")
-                                .font(self.look.mono(10.0))
-                                .color(mute),
-                        );
-                    });
-                    ui.add_space(4.0);
+                    ui.add_space(6.0);
                     ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
                         for em in FAVORITES {
-                            if self.stamp_cell(ui, ctx, paper, ink, Some(em), &mut chosen) {
-                                // chosen
-                            }
+                            self.stamp_cell(ui, ctx, paper, ink, Some(em), &mut chosen);
                         }
                         if self.stamp_cell(ui, ctx, paper, ink, None, &mut chosen) {
                             chosen = Some(String::new());
                         }
                     });
-                    ui.add_space(10.0);
-
+                    ui.add_space(12.0);
                     let line = ui.cursor();
                     ui.painter().line_segment(
                         [
-                            pos2(inner.min.x, line.top() + 20.0),
-                            pos2(inner.max.x, line.top() + 20.0),
+                            pos2(inner.min.x, line.top() + 22.0),
+                            pos2(inner.max.x, line.top() + 22.0),
                         ],
-                        Stroke::new(0.8_f32, self.look.paper_rule),
+                        Stroke::new(0.85_f32, self.look.paper_rule),
                     );
                     let te = TextEdit::singleline(&mut self.emoji_query)
-                        .hint_text("paste an icon")
-                        .font(self.look.serif(15.0))
+                        .hint_text("paste a mark")
+                        .font(self.look.serif(16.0))
                         .text_color(ink)
                         .frame(false);
                     ui.add(te.desired_width(inner.width()));
-                    ui.add_space(8.0);
+                    ui.add_space(10.0);
 
                     let q = self.emoji_query.trim().to_string();
                     let catalog: Vec<char> = {
@@ -2289,9 +2270,9 @@ impl CahierApp {
                     };
 
                     let cell = 40.0;
-                    let gap = 2.0;
+                    let gap = 4.0;
                     let cols = ((inner.width() - 8.0) / (cell + gap)).floor().max(6.0) as usize;
-                    let grid_h = (inner.max.y - ui.cursor().top() - 8.0).max(160.0);
+                    let grid_h = (inner.max.y - ui.cursor().top() - 4.0).max(160.0);
                     ScrollArea::vertical().max_height(grid_h).show(ui, |ui| {
                         ui.spacing_mut().item_spacing = vec2(gap, gap);
                         let mut i = 0;
@@ -2355,31 +2336,16 @@ impl CahierApp {
     ) -> bool {
         let (rect, resp) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
         let p = ui.painter();
-        let edge = ink.gamma_multiply(if resp.hovered() { 0.38 } else { 0.16 });
-        p.rect_filled(
-            rect,
-            CornerRadius::same(1),
-            if resp.hovered() {
-                mix_col(paper, self.look.accent, 0.10)
-            } else {
-                paper
-            },
+        if resp.hovered() {
+            p.rect_filled(rect, CornerRadius::same(3), mix_col(paper, ink, 0.06));
+        }
+        p.line_segment(
+            [
+                pos2(rect.min.x + 4.0, rect.max.y - 1.0),
+                pos2(rect.max.x - 4.0, rect.max.y - 1.0),
+            ],
+            Stroke::new(0.7_f32, self.look.paper_rule),
         );
-        // Dentelure
-        let step = 4.0;
-        let mut x = rect.min.x + 2.0;
-        while x < rect.max.x - 1.0 {
-            p.circle_filled(pos2(x, rect.min.y), 0.85, self.look.desk.gamma_multiply(0.35));
-            p.circle_filled(pos2(x, rect.max.y), 0.85, self.look.desk.gamma_multiply(0.35));
-            x += step;
-        }
-        let mut y = rect.min.y + 2.0;
-        while y < rect.max.y - 1.0 {
-            p.circle_filled(pos2(rect.min.x, y), 0.85, self.look.desk.gamma_multiply(0.35));
-            p.circle_filled(pos2(rect.max.x, y), 0.85, self.look.desk.gamma_multiply(0.35));
-            y += step;
-        }
-        p.rect_stroke(rect, CornerRadius::same(1), Stroke::new(0.7_f32, edge), StrokeKind::Inside);
         match em {
             Some(em) => {
                 self.paint_emoji(ctx, &p, rect.shrink(5.0), em);
@@ -2405,6 +2371,57 @@ impl CahierApp {
         false
     }
 
+    fn shelf_slot() -> Vec2 {
+        vec2(
+            DOS_W + DOS_PAD * 2.0,
+            DOS_PAD + PAPER_PEEK + DOS_H + TITLE_ROW,
+        )
+    }
+
+    fn paint_sel_wash(&self, p: &Painter, rect: Rect, strong: bool) {
+        let (r, g, b) = if self.look.dark {
+            (255_u8, 255, 255)
+        } else {
+            (self.look.ink.r(), self.look.ink.g(), self.look.ink.b())
+        };
+        let fill = if strong {
+            if self.look.dark { 28 } else { 22 }
+        } else if self.look.dark {
+            18
+        } else {
+            16
+        };
+        let line = if strong {
+            if self.look.dark { 78 } else { 56 }
+        } else if self.look.dark {
+            52
+        } else {
+            36
+        };
+        p.rect_filled(
+            rect,
+            CornerRadius::same(11),
+            Color32::from_rgba_unmultiplied(r, g, b, fill),
+        );
+        p.rect_stroke(
+            rect,
+            CornerRadius::same(11),
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(r, g, b, line)),
+            StrokeKind::Inside,
+        );
+    }
+
+    fn place_dos(&self, ui: &mut Ui, cell: Rect, hot: bool) {
+        let face = Rect::from_min_size(
+            pos2(
+                cell.center().x - DOS_W * 0.5,
+                cell.min.y + DOS_PAD + PAPER_PEEK,
+            ),
+            vec2(DOS_W, DOS_H),
+        );
+        self.paint_sel_wash(&ui.painter_at(cell), face.expand(5.0), hot);
+    }
+
     fn cahier_dos(
         &mut self,
         ui: &mut Ui,
@@ -2417,14 +2434,13 @@ impl CahierApp {
         );
         let (slot_rect, resp) = ui.allocate_exact_size(slot, Sense::click());
         let id = Id::new("cahier-dos").with(meta.id);
+        let renaming = self.rename_id == Some(meta.id) && !self.shelf_trash;
         let pointer = ui.input(|i| i.pointer.hover_pos());
-        let over = pointer.is_some_and(|p| slot_rect.contains(p));
+        let over = !renaming && pointer.is_some_and(|p| slot_rect.contains(p));
         if over {
             ui.ctx().request_repaint();
         }
-        let lift_t = ui
-            .ctx()
-            .animate_bool_with_time(id.with("peek"), over, 0.16);
+        let lift_t = ui.ctx().animate_bool_with_time(id.with("peek"), over, 0.16);
         let lift = lift_t * lift_t * (3.0 - 2.0 * lift_t);
         let discarded = self.shelf_trash;
         let e = if discarded { lift * 0.2 } else { lift };
@@ -2445,10 +2461,7 @@ impl CahierApp {
             vec2(DOS_W, DOS_H),
         );
         let painter = ui.painter_at(slot_rect);
-        let hit = Rect::from_min_max(
-            face.min,
-            pos2(face.max.x, face.max.y + TITLE_ROW),
-        );
+        let hit = Rect::from_min_max(face.min, pos2(face.max.x, face.max.y + TITLE_ROW));
         self.shelf_slots.push((meta.id, hit));
         let lifted = self.shelf_haul_armed && self.shelf_haul_ids.contains(&meta.id);
         if lifted {
@@ -2461,26 +2474,7 @@ impl CahierApp {
         }
 
         if selected {
-            let (r, g, b) = if self.look.dark {
-                (255_u8, 255, 255)
-            } else {
-                (self.look.ink.r(), self.look.ink.g(), self.look.ink.b())
-            };
-            let halo = face.expand(5.0);
-            painter.rect_filled(
-                halo,
-                CornerRadius::same(11),
-                Color32::from_rgba_unmultiplied(r, g, b, if self.look.dark { 18 } else { 16 }),
-            );
-            painter.rect_stroke(
-                halo,
-                CornerRadius::same(11),
-                Stroke::new(
-                    1.0_f32,
-                    Color32::from_rgba_unmultiplied(r, g, b, if self.look.dark { 52 } else { 36 }),
-                ),
-                StrokeKind::Inside,
-            );
+            self.paint_sel_wash(&painter, face.expand(5.0), false);
         }
 
         painter.rect_filled(
@@ -2554,7 +2548,7 @@ impl CahierApp {
             );
         }
 
-        // Centre du cartonnage (le titre est sous le dos).
+        // Center of the board (the title sits under the spine).
         let cover = Rect::from_min_max(
             pos2(face.min.x + 13.0, face.min.y + 12.0),
             pos2(face.max.x - 6.0, face.max.y - 12.0),
@@ -2593,66 +2587,13 @@ impl CahierApp {
             pos2(face.min.x, face.max.y + 4.0),
             vec2(face.width(), TITLE_ROW),
         );
-        let renaming = self.rename_id == Some(meta.id) && !self.shelf_trash;
         if renaming {
-            let mut commit = false;
-            let mut cancel = false;
-            ui.scope_builder(UiBuilder::new().max_rect(title_rect), |ui| {
-                ui.visuals_mut().override_text_color = Some(self.look.fg);
-                ui.visuals_mut().widgets.inactive.bg_fill = Color32::TRANSPARENT;
-                ui.visuals_mut().widgets.hovered.bg_fill = Color32::TRANSPARENT;
-                ui.visuals_mut().widgets.active.bg_fill = Color32::TRANSPARENT;
-                ui.visuals_mut().widgets.open.bg_fill = Color32::TRANSPARENT;
-                ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::NONE;
-                ui.visuals_mut().widgets.hovered.bg_stroke = Stroke::NONE;
-                ui.visuals_mut().widgets.active.bg_stroke = Stroke::NONE;
-                ui.visuals_mut().widgets.open.bg_stroke = Stroke::NONE;
-                let te = TextEdit::singleline(&mut self.rename_buf)
-                    .font(self.look.serif(15.0))
-                    .text_color(self.look.fg)
-                    .desired_width(title_rect.width())
-                    .frame(false)
-                    .margin(Margin::ZERO)
-                    .horizontal_align(Align::Center)
-                    .id(id.with("rename"));
-                let r = ui.add(te);
-                let armed = id.with("rename-armed");
-                let already = ui
-                    .ctx()
-                    .data(|d| d.get_temp::<bool>(armed).unwrap_or(false));
-                if !already {
-                    r.request_focus();
-                    ui.ctx().data_mut(|d| d.insert_temp(armed, true));
-                }
-                if r.lost_focus() {
-                    ui.ctx().data_mut(|d| d.remove::<bool>(armed));
-                    if ui.input(|i| i.key_pressed(Key::Escape)) {
-                        cancel = true;
-                    } else {
-                        commit = true;
-                    }
-                } else if r.has_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                    commit = true;
-                }
-            });
-            if commit {
-                let title = self.rename_buf.trim().to_string();
-                if !title.is_empty() {
-                    if let Some(mut n) = self.lib.load_note(meta.id) {
-                        n.title = title;
-                        n.touch();
-                        self.lib.save_note(&n);
-                    }
-                }
-                self.rename_id = None;
-            } else if cancel {
-                self.rename_id = None;
-            }
+            self.rename_rect = Some(title_rect);
         } else {
             let title: String = {
                 let t = meta.title.as_str();
-                if t.chars().count() > 16 {
-                    format!("{}…", t.chars().take(14).collect::<String>())
+                if t.chars().count() > 14 {
+                    format!("{}…", t.chars().take(12).collect::<String>())
                 } else {
                     t.to_string()
                 }
@@ -2665,7 +2606,7 @@ impl CahierApp {
                 };
                 let name = Rect::from_center_size(
                     title_rect.center(),
-                    vec2((title_rect.width() - 8.0).max(48.0), 22.0),
+                    vec2((title_rect.width() - 4.0).max(56.0), 26.0),
                 );
                 painter.rect_filled(
                     name,
@@ -2677,7 +2618,7 @@ impl CahierApp {
                 title_rect.center(),
                 Align2::CENTER_CENTER,
                 title,
-                self.look.serif(15.0),
+                self.look.serif(18.0),
                 self.look.fg,
             );
             if !self.shelf_trash {
@@ -2685,71 +2626,17 @@ impl CahierApp {
                 if title_resp.clicked() {
                     self.rename_buf = meta.title.clone();
                     self.rename_id = Some(meta.id);
+                    self.rename_rect = Some(title_rect);
                 }
                 title_resp.on_hover_cursor(CursorIcon::Text);
             }
         }
 
         let mut act = None;
-        let mut menu_act = None;
-        resp.context_menu(|ui| {
-            ui.set_min_width(140.0);
-            if !self.shelf_trash {
-                if ui.button("Open").clicked() {
-                    menu_act = Some(DosAct::Open);
-                    ui.close();
-                }
-                if ui.button("Rename").clicked() {
-                    menu_act = Some(DosAct::Rename);
-                    ui.close();
-                }
-                if ui.button("Icon…").clicked() {
-                    menu_act = Some(DosAct::Emoji);
-                    ui.close();
-                }
-                if ui.button("Duplicate").clicked() {
-                    menu_act = Some(DosAct::Dup);
-                    ui.close();
-                }
-                ui.separator();
-                if ui
-                    .button(if meta.pinned { "Unpin" } else { "Pin" })
-                    .clicked()
-                {
-                    menu_act = Some(DosAct::Pin);
-                    ui.close();
-                }
-                if ui
-                    .button(RichText::new("Trash").color(Color32::from_rgb(0xe2, 0x4b, 0x4a)))
-                    .clicked()
-                {
-                    menu_act = Some(DosAct::Del);
-                    ui.close();
-                }
-            } else {
-                if ui.button("Restore").clicked() {
-                    menu_act = Some(DosAct::Restore);
-                    ui.close();
-                }
-                if ui
-                    .button(
-                        RichText::new("Delete").color(Color32::from_rgb(0xe2, 0x4b, 0x4a)),
-                    )
-                    .clicked()
-                {
-                    menu_act = Some(DosAct::Del);
-                    ui.close();
-                }
-            }
-        });
-        if menu_act.is_some() {
-            act = menu_act;
-        }
-
         if act.is_none() && !renaming && resp.long_touched() {
             act = Some(DosAct::Select);
         }
-        if act.is_none() && !renaming {
+        if act.is_none() && !renaming && !resp.secondary_clicked() {
             let on_title = pointer.is_some_and(|p| title_rect.contains(p));
             let mods = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
             if resp.double_clicked() && !on_title && !self.shelf_trash {
@@ -2758,6 +2645,7 @@ impl CahierApp {
                 && !on_title
                 && !self.shelf_band_armed
                 && !self.shelf_haul_armed
+                && !self.shelf_fed
             {
                 act = Some(if mods.0 {
                     DosAct::Toggle
@@ -2836,6 +2724,48 @@ impl CahierApp {
         resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
+    /// Leave the lectern: a paper plate showing three spines.
+    fn shelf_exit_btn(&self, ui: &mut Ui) -> Response {
+        let h = self.chrome_btn();
+        let w = h + 10.0;
+        let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+        let p = ui.painter();
+        let fill = if resp.hovered() {
+            mix_col(self.look.desk_deep, self.look.paper, 0.22)
+        } else {
+            self.look.desk_deep
+        };
+        p.rect_filled(rect, CornerRadius::same(9), fill);
+        p.rect_stroke(
+            rect,
+            CornerRadius::same(9),
+            Stroke::new(1.0_f32, self.look.muted.gamma_multiply(0.45)),
+            StrokeKind::Inside,
+        );
+        // Three notebook spines side by side — the shelf.
+        let cloth = [
+            self.look.accent,
+            mix_col(self.look.ink, self.look.accent, 0.35),
+            self.look.fg.gamma_multiply(0.72),
+        ];
+        let spine_w = 5.2;
+        let spine_h = h * 0.52;
+        let gap = 3.4;
+        let total = spine_w * 3.0 + gap * 2.0;
+        let left = rect.center().x - total * 0.5;
+        let top = rect.center().y - spine_h * 0.5;
+        for (i, col) in cloth.iter().enumerate() {
+            let x = left + i as f32 * (spine_w + gap);
+            let r = Rect::from_min_size(pos2(x, top), vec2(spine_w, spine_h));
+            p.rect_filled(r, CornerRadius::same(1), *col);
+            p.line_segment(
+                [pos2(r.center().x, r.min.y + 2.2), pos2(r.center().x, r.max.y - 2.2)],
+                Stroke::new(1.0_f32, self.look.desk_deep.gamma_multiply(0.35)),
+            );
+        }
+        resp.on_hover_cursor(CursorIcon::PointingHand)
+    }
+
     fn inkwell(&self, ui: &mut Ui) -> Response {
         let size = 56.0;
         let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
@@ -2866,7 +2796,7 @@ impl CahierApp {
         self.handle_drops_and_paste(ctx);
 
         TopBottomPanel::top("rule")
-            .exact_height(44.0)
+            .exact_height(52.0)
             .show_separator_line(false)
             .frame(Frame::NONE.fill(self.look.desk))
             .show(ctx, |ui| {
@@ -2880,14 +2810,14 @@ impl CahierApp {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(6.0);
                     if self
-                        .round_well(ui, 40.0, false, paint_back)
-                        .on_hover_text("Library")
+                        .shelf_exit_btn(ui)
+                        .on_hover_text("Shelf")
                         .clicked()
                     {
                         self.close_desk();
                         return;
                     }
-                    ui.add_space(6.0);
+                    ui.add_space(8.0);
                     let te = TextEdit::singleline(&mut self.title_buf)
                         .font(self.look.serif(20.0))
                         .desired_width(280.0)
@@ -2898,10 +2828,11 @@ impl CahierApp {
                             self.mark_dirty();
                         }
                     }
+                    let chrome = self.chrome_btn();
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(8.0);
                         let more = self
-                            .round_well(ui, 36.0, false, paint_more)
+                            .round_well(ui, chrome, false, paint_more)
                             .on_hover_text("More");
                         let mut act = None;
                         Popup::menu(&more).show(|ui| {
@@ -2920,14 +2851,14 @@ impl CahierApp {
                             _ => {}
                         }
                         if self
-                            .round_well(ui, 36.0, false, paint_fit)
+                            .round_well(ui, chrome, false, paint_fit)
                             .on_hover_text("Fit")
                             .clicked()
                         {
                             self.fit_to_screen();
                         }
                         if self
-                            .round_well(ui, 36.0, false, paint_zoom_in)
+                            .round_well(ui, chrome, false, paint_zoom_in)
                             .on_hover_text("Zoom in")
                             .clicked()
                         {
@@ -2941,14 +2872,15 @@ impl CahierApp {
                             } else {
                                 self.look.muted
                             };
-                            let (r, lab) = ui.allocate_exact_size(vec2(46.0, 28.0), Sense::click());
+                            let (r, lab) =
+                                ui.allocate_exact_size(vec2(56.0, chrome), Sense::click());
                             ui.painter()
-                                .rect_filled(r, CornerRadius::same(8), self.look.desk_deep);
+                                .rect_filled(r, CornerRadius::same(10), self.look.desk_deep);
                             ui.painter().text(
                                 r.center(),
                                 Align2::CENTER_CENTER,
                                 pct,
-                                self.look.mono(12.0),
+                                self.look.mono(13.0),
                                 color,
                             );
                             if lab
@@ -2960,14 +2892,14 @@ impl CahierApp {
                             }
                         }
                         if self
-                            .round_well(ui, 36.0, false, paint_zoom_out)
+                            .round_well(ui, chrome, false, paint_zoom_out)
                             .on_hover_text("Zoom out")
                             .clicked()
                         {
                             self.zoom_out();
                         }
                         if self
-                            .round_well(ui, 36.0, false, paint_paper_icon)
+                            .round_well(ui, chrome, false, paint_paper_icon)
                             .on_hover_text(
                                 self.note
                                     .as_ref()
@@ -2981,13 +2913,6 @@ impl CahierApp {
                                 self.mark_dirty();
                             }
                         }
-                        if self
-                            .round_well(ui, 36.0, false, paint_plus)
-                            .on_hover_text("Page")
-                            .clicked()
-                        {
-                            self.add_page();
-                        }
                     });
                 });
             });
@@ -2999,45 +2924,63 @@ impl CahierApp {
             });
 
         self.ui_floating_dock(ctx);
+        self.ui_ink_strip(ctx);
+        self.ui_ink_tin(ctx);
+        if let Some((page, local)) = self.pending_image.take() {
+            self.pick_image(page, local);
+        }
     }
 
     fn ui_floating_dock(&mut self, ctx: &Context) {
         let screen = ctx.screen_rect();
         let vertical = self.dock_edge.vertical();
-        let mut area = Area::new(Id::new("cahier-dock"))
+        let edge_key = match self.dock_edge {
+            DockEdge::Top => 0_u8,
+            DockEdge::Bottom => 1,
+            DockEdge::Left => 2,
+            DockEdge::Right => 3,
+        };
+        // Distinct id per edge, so egui does not reuse the previous layout size
+        // (a vertical bar would become a large square once horizontal).
+        let mut area = Area::new(Id::new(("cahier-dock", edge_key)))
             .order(Order::Foreground)
-            .interactable(true);
+            .interactable(true)
+            .constrain(true);
         if let Some(pos) = self.dock_float {
             let pos = pos.clamp(screen.min, pos2(screen.max.x - 48.0, screen.max.y - 48.0));
             area = area.current_pos(pos);
         } else {
             let (align, off) = match self.dock_edge {
                 DockEdge::Bottom => (Align2::CENTER_BOTTOM, vec2(0.0, -12.0)),
-                DockEdge::Top => (Align2::CENTER_TOP, vec2(0.0, 50.0)),
+                DockEdge::Top => (Align2::CENTER_TOP, vec2(0.0, 60.0)),
                 DockEdge::Left => (Align2::LEFT_CENTER, vec2(10.0, 0.0)),
                 DockEdge::Right => (Align2::RIGHT_CENTER, vec2(-10.0, 0.0)),
             };
             area = area.anchor(align, off);
         }
         let inner = area.show(ctx, |ui| {
+            // Shrink-wrap, so the area stays inside a tight max_rect.
+            ui.set_max_size(vec2(
+                (screen.width() - 24.0).max(80.0),
+                (screen.height() - 80.0).max(80.0),
+            ));
             Frame::NONE
                 .fill(self.look.desk_deep)
                 .stroke(Stroke::new(1.0_f32, self.look.muted.gamma_multiply(0.38)))
-                .corner_radius(28)
+                .corner_radius(30)
                 .inner_margin(if vertical {
-                    Margin::symmetric(6, 10)
+                    Margin::symmetric(6, 8)
                 } else {
-                    Margin::symmetric(10, 6)
+                    Margin::symmetric(8, 6)
                 })
                 .show(ui, |ui| {
                     if vertical {
-                        ui.set_max_height((screen.height() - 80.0).max(120.0));
                         ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
                         ui.vertical(|ui| {
                             self.dock_inner(ui, true);
                         });
                     } else {
-                        ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+                        ui.spacing_mut().item_spacing = vec2(3.0, 0.0);
                         ui.horizontal(|ui| {
                             self.dock_inner(ui, false);
                         });
@@ -3045,6 +2988,301 @@ impl CahierApp {
                 });
         });
         ctx.data_mut(|d| d.insert_temp(Id::new("dock-rect"), inner.response.rect));
+    }
+
+    fn ui_ink_strip(&mut self, ctx: &Context) {
+        if !self.palette_open {
+            ctx.data_mut(|d| d.remove::<Rect>(Id::new("strip-rect")));
+            return;
+        }
+        let screen = ctx.screen_rect();
+        let dock = ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+            .unwrap_or(Rect::from_center_size(screen.center(), vec2(48.0, 48.0)));
+        let vertical = self.dock_edge.vertical();
+        let gap = 8.0;
+        let high = self.tool == Tool::Highlighter;
+        let n_colors = if high {
+            self.look.highs.len()
+        } else {
+            self.look.inks.len().saturating_sub(1).max(1)
+        };
+        let show_w = self.tool.is_ink() || self.tool.is_eraser();
+        let cell = 26.0;
+        let strip_pad = 10.0;
+        let items = n_colors + 1 + if show_w { 3 } else { 0 };
+        let long = strip_pad * 2.0 + items as f32 * cell + (items.saturating_sub(1) as f32) * 2.0;
+        let short = 40.0;
+        let (sw, sh) = if vertical {
+            (short, long.min(screen.height() - 100.0))
+        } else {
+            (long.min(screen.width() - 80.0), short)
+        };
+        let pos = match self.dock_edge {
+            DockEdge::Left => pos2(
+                dock.max.x + gap,
+                (dock.center().y - sh * 0.5).clamp(screen.min.y + 48.0, screen.max.y - sh - 12.0),
+            ),
+            DockEdge::Right => pos2(
+                dock.min.x - gap - sw,
+                (dock.center().y - sh * 0.5).clamp(screen.min.y + 48.0, screen.max.y - sh - 12.0),
+            ),
+            DockEdge::Top => pos2(
+                (dock.center().x - sw * 0.5).clamp(screen.min.x + 12.0, screen.max.x - sw - 12.0),
+                dock.max.y + gap,
+            ),
+            DockEdge::Bottom => pos2(
+                (dock.center().x - sw * 0.5).clamp(screen.min.x + 12.0, screen.max.x - sw - 12.0),
+                dock.min.y - gap - sh,
+            ),
+        };
+        let current = Color32::from_rgb(self.ink.r(), self.ink.g(), self.ink.b());
+        let inner = Area::new(Id::new("cahier-ink-strip"))
+            .order(Order::Foreground)
+            .fixed_pos(pos)
+            .constrain(true)
+            .show(ctx, |ui| {
+                Frame::NONE
+                    .fill(self.look.desk_deep)
+                    .stroke(Stroke::new(1.0_f32, self.look.muted.gamma_multiply(0.38)))
+                    .corner_radius(22)
+                    .inner_margin(Margin::symmetric(6, 6))
+                    .show(ui, |ui| {
+                        if vertical {
+                            ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+                            ui.with_layout(Layout::top_down(Align::Center), |ui| {
+                                self.ink_strip_inner(ui, true, high, current, show_w);
+                            });
+                        } else {
+                            ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                self.ink_strip_inner(ui, false, high, current, show_w);
+                            });
+                        }
+                    });
+            });
+        ctx.data_mut(|d| d.insert_temp(Id::new("strip-rect"), inner.response.rect));
+        if ctx.input(|i| i.pointer.primary_pressed()) {
+            if let Some(p) = ctx.pointer_latest_pos() {
+                let on_strip = inner.response.rect.expand(4.0).contains(p);
+                let on_dock = dock.expand(6.0).contains(p);
+                let on_tin = ctx
+                    .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
+                    .map(|r| r.expand(4.0).contains(p))
+                    .unwrap_or(false);
+                if !on_strip && !on_dock && !on_tin {
+                    self.palette_open = false;
+                    self.tin_open = false;
+                }
+            }
+        }
+    }
+
+    fn ink_strip_inner(
+        &mut self,
+        ui: &mut Ui,
+        vertical: bool,
+        high: bool,
+        current: Color32,
+        show_w: bool,
+    ) {
+        if high {
+            let n = self.look.highs.len();
+            for i in 0..n {
+                let c = self.look.highs[i];
+                let swatch = Color32::from_rgb(c.r(), c.g(), c.b());
+                if self.color_dot(ui, swatch, same_rgb(swatch, current), vertical) {
+                    self.pick_theme_ink(i);
+                }
+            }
+        } else {
+            let n = self.look.inks.len().saturating_sub(1).max(1);
+            for i in 0..n {
+                let c = self.look.inks[i];
+                if self.color_dot(ui, c, same_rgb(c, current) && !self.color_custom, vertical) {
+                    self.pick_theme_ink(i);
+                }
+            }
+        }
+        if self
+            .rainbow_well(ui, self.tin_open)
+            .on_hover_text("Color tin")
+            .clicked()
+        {
+            self.tin_open = !self.tin_open;
+        }
+        if show_w {
+            ui.add_space(4.0);
+            for &(w, r) in &[(2.2_f32, 3.0), (5.0, 4.4), (11.0, 6.0)] {
+                let on = (self.width - w).abs() < 1.6;
+                if self.thick_dot(ui, r, on, vertical) {
+                    self.width = w;
+                    if self.tool.is_ink() {
+                        self.last_ink_width = self.width;
+                    }
+                }
+            }
+        }
+    }
+
+    fn ui_ink_tin(&mut self, ctx: &Context) {
+        if !self.tin_open {
+            ctx.data_mut(|d| d.remove::<Rect>(Id::new("tin-rect")));
+            return;
+        }
+        let screen = ctx.screen_rect();
+        let dock = ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+            .unwrap_or(Rect::from_center_size(screen.center(), vec2(48.0, 48.0)));
+        let tin_w = 228.0;
+        let tin_h = 268.0;
+        let gap = 10.0;
+        let pos = match self.dock_edge {
+            DockEdge::Left => pos2(dock.max.x + gap, (dock.center().y - tin_h * 0.5).max(screen.min.y + 48.0)),
+            DockEdge::Right => pos2(
+                dock.min.x - gap - tin_w,
+                (dock.center().y - tin_h * 0.5).max(screen.min.y + 48.0),
+            ),
+            DockEdge::Top => pos2(dock.center().x - tin_w * 0.5, dock.max.y + gap),
+            DockEdge::Bottom => pos2(dock.center().x - tin_w * 0.5, dock.min.y - gap - tin_h),
+        };
+        let inner = Area::new(Id::new("cahier-tin"))
+            .order(Order::Foreground)
+            .fixed_pos(pos)
+            .constrain(true)
+            .show(ctx, |ui| {
+                Frame::NONE
+                    .fill(self.look.desk_deep)
+                    .stroke(Stroke::new(1.0_f32, self.look.muted.gamma_multiply(0.38)))
+                    .corner_radius(18)
+                    .inner_margin(Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.set_width(tin_w - 24.0);
+                        ui.spacing_mut().item_spacing = vec2(4.0, 8.0);
+                        let sq = 204.0;
+                        let (sv, sv_resp) =
+                            ui.allocate_exact_size(vec2(sq, 132.0), Sense::click_and_drag());
+                        paint_sv_field(ui.painter(), sv, self.tin_hue);
+                        let (_, s0, v0) = rgb_to_hsv(self.ink);
+                        let cur = pos2(sv.min.x + s0 * sv.width(), sv.min.y + (1.0 - v0) * sv.height());
+                        ui.painter().circle_stroke(
+                            cur,
+                            6.0,
+                            Stroke::new(2.0_f32, Color32::WHITE),
+                        );
+                        ui.painter().circle_stroke(
+                            cur,
+                            6.0,
+                            Stroke::new(1.0_f32, self.look.fg.gamma_multiply(0.7)),
+                        );
+                        if sv_resp.dragged() || sv_resp.clicked() {
+                            if let Some(p) = sv_resp.interact_pointer_pos() {
+                                let s = ((p.x - sv.min.x) / sv.width()).clamp(0.0, 1.0);
+                                let v = (1.0 - (p.y - sv.min.y) / sv.height()).clamp(0.0, 1.0);
+                                self.pick_free_ink(hsv_to_rgb(self.tin_hue, s, v));
+                            }
+                        }
+
+                        let (hue_r, hue_resp) =
+                            ui.allocate_exact_size(vec2(sq, 16.0), Sense::click_and_drag());
+                        paint_hue_bar(ui.painter(), hue_r);
+                        let hx = hue_r.min.x + self.tin_hue * hue_r.width();
+                        ui.painter().vline(
+                            hx,
+                            hue_r.y_range(),
+                            Stroke::new(2.0_f32, Color32::WHITE),
+                        );
+                        if hue_resp.dragged() || hue_resp.clicked() {
+                            if let Some(p) = hue_resp.interact_pointer_pos() {
+                                self.tin_hue = ((p.x - hue_r.min.x) / hue_r.width()).clamp(0.0, 1.0);
+                                let (_, s, v) = rgb_to_hsv(self.ink);
+                                self.pick_free_ink(hsv_to_rgb(self.tin_hue, s.max(0.12), v.max(0.18)));
+                            }
+                        }
+
+                        let cols = 12;
+                        let rows = 6;
+                        let pan = 14.5;
+                        let gap_p = 2.6;
+                        let grid_w = cols as f32 * pan + (cols - 1) as f32 * gap_p;
+                        let grid_h = (rows + 1) as f32 * pan + rows as f32 * gap_p;
+                        let (grid, _) =
+                            ui.allocate_exact_size(vec2(grid_w.max(sq), grid_h), Sense::hover());
+                        let origin = pos2(
+                            grid.min.x + (grid.width() - grid_w) * 0.5,
+                            grid.min.y,
+                        );
+                        let painter = ui.painter();
+                        for row in 0..rows {
+                            for col in 0..cols {
+                                let h = col as f32 / cols as f32;
+                                let v = 0.92 - row as f32 * 0.13;
+                                let s = 0.88;
+                                let c = hsv_to_rgb(h, s, v);
+                                let r = Rect::from_min_size(
+                                    origin
+                                        + vec2(
+                                            col as f32 * (pan + gap_p),
+                                            row as f32 * (pan + gap_p),
+                                        ),
+                                    vec2(pan, pan),
+                                );
+                                painter.circle_filled(r.center(), pan * 0.42, c);
+                                if same_rgb(c, self.ink) {
+                                    painter.circle_stroke(
+                                        r.center(),
+                                        pan * 0.42 + 2.0,
+                                        Stroke::new(1.5_f32, self.look.fg),
+                                    );
+                                }
+                                let hit = ui.interact(r, Id::new(("tin-pan", row, col)), Sense::click());
+                                if hit.clicked() {
+                                    self.pick_free_ink(c);
+                                }
+                            }
+                        }
+                        let gray_y = origin.y + rows as f32 * (pan + gap_p);
+                        for col in 0..cols {
+                            let g = col as f32 / (cols - 1) as f32;
+                            let c = hsv_to_rgb(0.0, 0.0, g);
+                            let r = Rect::from_min_size(
+                                pos2(origin.x + col as f32 * (pan + gap_p), gray_y),
+                                vec2(pan, pan),
+                            );
+                            painter.circle_filled(r.center(), pan * 0.42, c);
+                            painter.circle_stroke(
+                                r.center(),
+                                pan * 0.42,
+                                Stroke::new(0.6_f32, self.look.fg.gamma_multiply(0.35)),
+                            );
+                            if same_rgb(c, self.ink) {
+                                painter.circle_stroke(
+                                    r.center(),
+                                    pan * 0.42 + 2.0,
+                                    Stroke::new(1.5_f32, self.look.fg),
+                                );
+                            }
+                            let hit = ui.interact(r, Id::new(("tin-gray", col)), Sense::click());
+                            if hit.clicked() {
+                                self.pick_free_ink(c);
+                            }
+                        }
+                    });
+            });
+        ctx.data_mut(|d| d.insert_temp(Id::new("tin-rect"), inner.response.rect));
+        if ctx.input(|i| i.pointer.primary_pressed()) {
+            if let Some(p) = ctx.pointer_latest_pos() {
+                let on_tin = inner.response.rect.expand(4.0).contains(p);
+                let on_dock = dock.expand(6.0).contains(p);
+                let on_strip = ctx
+                    .data(|d| d.get_temp::<Rect>(Id::new("strip-rect")))
+                    .map(|r| r.expand(4.0).contains(p))
+                    .unwrap_or(false);
+                if !on_tin && !on_dock && !on_strip {
+                    self.tin_open = false;
+                }
+            }
+        }
     }
 
     fn dock_inner(&mut self, ui: &mut Ui, vertical: bool) {
@@ -3176,47 +3414,19 @@ impl CahierApp {
             self.tool = Tool::Lasso;
         }
         self.dock_gap(ui, vertical);
-        let mode = self.mode();
+        let current = Color32::from_rgb(self.ink.r(), self.ink.g(), self.ink.b());
         if self
-            .round_well(ui, slot, mode.is_tablette(), |p, c, fg| {
-                paint_mode(p, c, mode, fg)
+            .palette_chip(ui, current, self.palette_open || self.tin_open, vertical)
+            .on_hover_text(if self.palette_open {
+                "Fold ink"
+            } else {
+                "Ink"
             })
-            .on_hover_text(format!("{}  ·  k", mode.label()))
             .clicked()
         {
-            self.toggle_mode();
-            let t = ui.input(|i| i.time);
-            self.toast(self.mode().hint(), t);
-        }
-        self.dock_gap(ui, vertical);
-        let high = self.tool == Tool::Highlighter;
-        if high {
-            let n = self.look.highs.len();
-            for (i, c) in self.look.highs.iter().enumerate() {
-                let swatch = Color32::from_rgb(c.r(), c.g(), c.b());
-                if self.color_dot(ui, swatch, i == self.color_i % n.max(1), vertical) {
-                    self.color_i = i;
-                }
-            }
-        } else {
-            let n = self.look.inks.len().saturating_sub(1).max(1);
-            for i in 0..n {
-                let c = self.look.inks[i];
-                if self.color_dot(ui, c, self.color_i % n == i, vertical) {
-                    self.color_i = i;
-                }
-            }
-        }
-        if self.tool.is_ink() || self.tool.is_eraser() {
-            ui.add_space(6.0);
-            for &(w, r) in &[(2.2_f32, 3.0), (5.0, 4.4), (11.0, 6.0)] {
-                let on = (self.width - w).abs() < 1.6;
-                if self.thick_dot(ui, r, on, vertical) {
-                    self.width = w;
-                    if self.tool.is_ink() {
-                        self.last_ink_width = w;
-                    }
-                }
+            self.palette_open = !self.palette_open;
+            if !self.palette_open {
+                self.tin_open = false;
             }
         }
         self.dock_gap(ui, vertical);
@@ -3226,14 +3436,16 @@ impl CahierApp {
         if self.tool_glyph(ui, Tool::Image) {
             self.finish_text_edit();
             self.tool = Tool::Image;
+            self.pending_image = Some(self.drop_spot());
         }
     }
 
     fn dock_grip(&self, ui: &mut Ui, vertical: bool) -> Response {
+        let s = self.slot();
         let size = if vertical {
-            vec2(38.0, 18.0)
+            vec2(s, 14.0)
         } else {
-            vec2(18.0, 38.0)
+            vec2(14.0, s)
         };
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
         let p = ui.painter();
@@ -3261,9 +3473,10 @@ impl CahierApp {
     }
 
     fn dock_gap(&self, ui: &mut Ui, vertical: bool) {
+        let s = self.slot();
         if vertical {
-            ui.add_space(4.0);
-            let (rect, _) = ui.allocate_exact_size(vec2(22.0, 2.0), Sense::hover());
+            ui.add_space(2.0);
+            let (rect, _) = ui.allocate_exact_size(vec2(s, 2.0), Sense::hover());
             ui.painter().line_segment(
                 [
                     pos2(rect.min.x + 1.0, rect.center().y),
@@ -3271,10 +3484,10 @@ impl CahierApp {
                 ],
                 Stroke::new(1.0_f32, self.look.muted.gamma_multiply(0.55)),
             );
-            ui.add_space(4.0);
+            ui.add_space(2.0);
         } else {
-            ui.add_space(4.0);
-            let (rect, _) = ui.allocate_exact_size(vec2(2.0, 18.0), Sense::hover());
+            ui.add_space(2.0);
+            let (rect, _) = ui.allocate_exact_size(vec2(2.0, s), Sense::hover());
             ui.painter().line_segment(
                 [
                     pos2(rect.center().x, rect.min.y + 1.0),
@@ -3282,15 +3495,72 @@ impl CahierApp {
                 ],
                 Stroke::new(1.0_f32, self.look.muted.gamma_multiply(0.55)),
             );
-            ui.add_space(4.0);
+            ui.add_space(2.0);
         }
     }
 
-    fn color_dot(&self, ui: &mut Ui, color: Color32, on: bool, vertical: bool) -> bool {
+    fn palette_chip(&self, ui: &mut Ui, color: Color32, open: bool, vertical: bool) -> Response {
+        let s = self.slot();
         let size = if vertical {
-            vec2(38.0, 26.0)
+            vec2(s, 30.0)
         } else {
-            vec2(28.0, 38.0)
+            vec2(32.0, s)
+        };
+        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        let c = rect.center();
+        let p = ui.painter();
+        let r = 7.4;
+        if !open {
+            p.circle_filled(c + vec2(2.4, 2.1), r - 0.6, color.gamma_multiply(0.55));
+        }
+        p.circle_filled(c, r + 1.3, self.look.fg.gamma_multiply(0.55));
+        p.circle_filled(c, r, color);
+        p.circle_stroke(
+            c,
+            r,
+            Stroke::new(1.05_f32, self.look.fg.gamma_multiply(0.55)),
+        );
+        if open {
+            p.circle_stroke(c, r + 3.4, Stroke::new(1.5_f32, self.look.fg));
+        }
+        resp.on_hover_cursor(CursorIcon::PointingHand)
+    }
+
+    fn rainbow_well(&self, ui: &mut Ui, on: bool) -> Response {
+        let s = self.slot();
+        let (rect, resp) = ui.allocate_exact_size(vec2(s, s), Sense::click());
+        let p = ui.painter();
+        let c = rect.center();
+        let r = s * 0.34;
+        for i in 0..12 {
+            let t0 = i as f32 / 12.0;
+            let t1 = (i + 1) as f32 / 12.0;
+            let a0 = t0 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+            let a1 = t1 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+            let col = hsv_to_rgb(t0 + 0.04, 0.9, 0.92);
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    c,
+                    pos2(c.x + a0.cos() * r, c.y + a0.sin() * r),
+                    pos2(c.x + a1.cos() * r, c.y + a1.sin() * r),
+                ],
+                col,
+                Stroke::NONE,
+            ));
+        }
+        p.circle_filled(c, r * 0.38, self.look.desk_deep);
+        if on {
+            p.circle_stroke(c, r + 2.6, Stroke::new(1.6_f32, self.look.fg));
+        }
+        resp.on_hover_cursor(CursorIcon::PointingHand)
+    }
+
+    fn color_dot(&self, ui: &mut Ui, color: Color32, on: bool, vertical: bool) -> bool {
+        let s = self.slot();
+        let size = if vertical {
+            vec2(s, 28.0)
+        } else {
+            vec2(30.0, s)
         };
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
         let c = rect.center();
@@ -3312,10 +3582,11 @@ impl CahierApp {
     }
 
     fn thick_dot(&self, ui: &mut Ui, r: f32, on: bool, vertical: bool) -> bool {
+        let s = self.slot();
         let size = if vertical {
-            vec2(38.0, 22.0)
+            vec2(s, 28.0)
         } else {
-            vec2(20.0, 38.0)
+            vec2(28.0, s)
         };
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
         let c = rect.center();
@@ -3364,20 +3635,8 @@ impl CahierApp {
         } else {
             self.look.desk_deep
         };
-        let n_ink = self.look.inks.len().max(1);
-        let n_wash = self.look.highs.len().max(1);
-        let ink = self
-            .look
-            .inks
-            .get(self.color_i % n_ink)
-            .copied()
-            .unwrap_or(fg);
-        let wash = self
-            .look
-            .highs
-            .get(self.color_i % n_wash)
-            .copied()
-            .unwrap_or(ink);
+        let ink = self.ink;
+        let wash = Color32::from_rgba_unmultiplied(ink.r(), ink.g(), ink.b(), 90);
         paint_tool(p, tool, c, fg, cut, ink, wash);
         resp.on_hover_cursor(CursorIcon::PointingHand)
     }
@@ -3400,7 +3659,7 @@ impl CahierApp {
                     .unwrap_or(1)
                     .max(1);
                 self.camera
-                    .show_slice(rect, page.min(n - 1), pw, ph, PAGE_SPAN);
+                    .show_writing(rect, page.min(n - 1), pw, ph);
             } else if self.need_fit {
                 let page = self.page_in_view(rect);
                 self.camera.fit_page(rect, page, pw, ph);
@@ -3411,6 +3670,7 @@ impl CahierApp {
         self.handle_camera(ui, &resp, rect);
         self.handle_tool(ui, &resp, rect);
         self.paint_world(&painter, rect);
+        self.paint_sheet_tabs(ui, &painter, rect);
         self.paint_overlays(ui, rect);
         self.cursor_for_tool(ui, &resp);
     }
@@ -3448,7 +3708,7 @@ impl CahierApp {
         } else if (egui_zoom - 1.0).abs() > 0.0005 {
             self.camera.zoom_at(focus, rect, egui_zoom);
         } else if !ctrl && point_scroll != Vec2::ZERO {
-            // Pavé tactile : deux doigts. Vertical = zoom, horizontal = panorama.
+            // Trackpad: two fingers. Vertical = zoom, horizontal = pan.
             if point_scroll.y.abs() >= point_scroll.x.abs() * 0.35 {
                 let f = (1.0 + point_scroll.y * 0.004).clamp(0.55, 1.85);
                 self.camera.zoom_at(focus, rect, f);
@@ -3491,7 +3751,12 @@ impl CahierApp {
         } else {
             ui.input(|i| i.any_touches())
         };
+        let on_tab = self.tab_held
+            || ui
+                .input(|i| i.pointer.press_origin())
+                .is_some_and(|p| self.sheet_tab_at(p, rect).is_some());
         if finger_pan
+            && !on_tab
             && mt.is_none()
             && !pen.pinching
             && !pen_busy
@@ -3504,6 +3769,14 @@ impl CahierApp {
     }
 
     fn handle_tool(&mut self, ui: &Ui, resp: &Response, rect: Rect) {
+        if self.tab_held {
+            let down = ui.input(|i| i.pointer.primary_down()) || self.tablet.snapshot().down;
+            self.tab_held = false;
+            if down {
+                self.tab_held = true;
+            }
+            return;
+        }
         let space = ui.input(|i| i.key_down(Key::Space));
         if space
             || ui.input(|i| i.pointer.middle_down())
@@ -3512,12 +3785,14 @@ impl CahierApp {
         {
             return;
         }
-        let shift = ui.input(|i| i.modifiers.shift);
         let pen = self.tablet.snapshot();
         let pen_ink =
             pen.down || pen.pressed || pen.released || (self.live.is_some() && self.live_from_pen);
         let screen_touch = ui.input(|i| i.any_touches());
-        if !pen_ink && self.live.is_none() {
+        let on_tab = ui
+            .input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos()))
+            .is_some_and(|p| self.sheet_tab_at(p, rect).is_some());
+        if !pen_ink && self.live.is_none() && !on_tab {
             if self.is_tablette() {
                 if self.palm_guard(&pen) || self.finger_alive(ui) {
                     return;
@@ -3527,7 +3802,6 @@ impl CahierApp {
             }
         }
 
-        let time = ui.input(|i| i.time);
         let extra: Vec<Pos2>;
         let (screen, primary_down, primary_pressed, primary_released, secondary) = if pen_ink {
             if let Some(screen) = pen.pos {
@@ -3535,7 +3809,7 @@ impl CahierApp {
                 (screen, pen.down, pen.pressed, pen.released, pen.eraser)
             } else {
                 if self.live.is_some() && self.live_from_pen && (pen.released || !pen.down) {
-                    self.finish_live(shift, time);
+                    self.finish_live();
                 }
                 return;
             }
@@ -3577,11 +3851,24 @@ impl CahierApp {
                 || d.get_temp::<Rect>(Id::new("top-rect"))
                     .map(|r| r.expand(2.0).contains(screen))
                     .unwrap_or(false)
+                || d.get_temp::<Rect>(Id::new("tin-rect"))
+                    .map(|r| r.expand(2.0).contains(screen))
+                    .unwrap_or(false)
+                || d.get_temp::<Rect>(Id::new("strip-rect"))
+                    .map(|r| r.expand(2.0).contains(screen))
+                    .unwrap_or(false)
         }) {
             if self.live.is_some() && (primary_released || !primary_down) {
-                self.finish_live(shift, time);
+                self.finish_live();
             }
             return;
+        }
+        if primary_pressed {
+            if let Some(edge) = self.sheet_tab_at(screen, rect) {
+                self.grow_sheet(edge);
+                self.tab_held = true;
+                return;
+            }
         }
         let paper = self.camera.to_paper(screen, rect);
         let n_pages = self.note.as_ref().map(|n| n.pages.len()).unwrap_or(1);
@@ -3606,6 +3893,9 @@ impl CahierApp {
                 s.push(InkPoint::new(local, 0.7));
                 self.live = Some((page, s));
                 self.live_from_pen = pen_ink;
+                self.shape_anchor = Some(local);
+                self.shape_still = Some(Instant::now());
+                self.shape_preview = None;
             }
             let speed = self.speed(local);
             let hw = self.pressure.latest();
@@ -3630,12 +3920,13 @@ impl CahierApp {
                     }
                 }
             }
+            self.consider_shape(local);
         }
         if self.live.is_some()
             && (primary_released || !primary_down)
             && !(tool.is_ink() && primary_down)
         {
-            self.finish_live(shift, time);
+            self.finish_live();
         }
 
         if tool.is_eraser() && (primary_down || secondary) {
@@ -3722,7 +4013,7 @@ impl CahierApp {
             self.drag_last = None;
         }
 
-        let tap = resp.clicked() || (pen_ink && primary_pressed);
+        let tap = primary_pressed || resp.clicked();
         if tool == Tool::Text && tap {
             if let Some((pg, id)) = self.hit_text(page, local) {
                 if self.editing_text != Some((pg, id)) {
@@ -3731,33 +4022,80 @@ impl CahierApp {
                     self.text_focus = true;
                 }
             } else {
-                self.finish_text_edit();
-                self.push_snapshot();
-                let mut tx = TextBox::new(local, self.ink_color());
-                tx.size = [420.0, 36.0];
-                let id = tx.id;
-                if let Some(n) = &mut self.note {
-                    if let Some(pg) = n.pages.get_mut(page) {
-                        pg.texts.push(tx);
+                let on_live = self.editing_text.is_some_and(|(pg, id)| {
+                    pg == page
+                        && self.note.as_ref().is_some_and(|n| {
+                            n.pages.get(pg).is_some_and(|p| {
+                                p.texts
+                                    .iter()
+                                    .find(|t| t.id == id)
+                                    .is_some_and(|t| t.rect().expand(12.0).contains(local))
+                            })
+                        })
+                });
+                if !on_live {
+                    self.finish_text_edit();
+                    self.push_snapshot();
+                    let mut tx = TextBox::new(local, self.ink_color());
+                    tx.size = [420.0, 48.0];
+                    let id = tx.id;
+                    if let Some(n) = &mut self.note {
+                        if let Some(pg) = n.pages.get_mut(page) {
+                            pg.texts.push(tx);
+                        }
                     }
+                    self.editing_text = Some((page, id));
+                    self.text_focus = true;
+                    self.mark_dirty();
                 }
-                self.editing_text = Some((page, id));
-                self.text_focus = true;
-                self.mark_dirty();
             }
         }
 
         if tool == Tool::Image && tap {
-            self.pick_image(page, local);
+            self.pending_image = Some((page, local));
         }
     }
 
-    fn finish_live(&mut self, shift: bool, time: f64) {
+    fn clear_shape_hold(&mut self) {
+        self.shape_anchor = None;
+        self.shape_still = None;
+        self.shape_preview = None;
+    }
+
+    /// After one second still, the free stroke snaps to a line, square, or circle.
+    fn consider_shape(&mut self, tip: Pos2) {
+        if self.live.is_none() {
+            return;
+        }
+        let still_r = 14.0 / self.camera.zoom.max(0.15);
+        let anchor = self.shape_anchor.unwrap_or(tip);
+        if anchor.distance(tip) > still_r {
+            self.shape_anchor = Some(tip);
+            self.shape_still = Some(Instant::now());
+            self.shape_preview = None;
+            return;
+        }
+        if self.shape_preview.is_some() {
+            return;
+        }
+        let since = *self.shape_still.get_or_insert_with(Instant::now);
+        if since.elapsed() < Duration::from_millis(1000) {
+            return;
+        }
+        let Some((_, stroke)) = &self.live else {
+            return;
+        };
+        self.shape_preview = maybe_snap_shape(stroke);
+    }
+
+    fn finish_live(&mut self) {
         self.live_from_pen = false;
+        let preview = self.shape_preview.take();
+        self.shape_anchor = None;
+        self.shape_still = None;
         if let Some((p, mut s)) = self.live.take() {
-            if let Some(snapped) = maybe_snap_shape(&s, shift) {
+            if let Some(snapped) = preview {
                 s = snapped;
-                self.toast("Shape", time);
             }
             if !s.points.is_empty() {
                 if let Some(n) = &mut self.note {
@@ -3902,7 +4240,8 @@ impl CahierApp {
 
     fn pick_image(&mut self, page: usize, local: Pos2) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("images", &["png", "jpg", "jpeg", "webp"])
+            .set_title("Place an image")
+            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif", "bmp"])
             .pick_file()
         else {
             return;
@@ -4011,7 +4350,7 @@ impl CahierApp {
             painter.rect_filled(paper, sheet_r, fill);
             self.paint_template(painter, paper, note.paper, cam.zoom);
             if note.paper == PaperKind::Lined {
-                self.paint_punches(painter, paper);
+                self.paint_punches(painter, paper, cam.zoom);
             }
             if note.paper != PaperKind::Slate {
                 let fold_c = self.look.paper_rule_strong;
@@ -4082,9 +4421,13 @@ impl CahierApp {
             .as_ref()
             .map(|n| n.page_h.max(1.0))
             .unwrap_or(PAGE_H);
-        if let Some((pi, live)) = &mut self.live {
-            let origin = page_origin(*pi, ph);
-            let mesh = live.tessellate().clone();
+        if let Some(pi) = self.live.as_ref().map(|(pi, _)| *pi) {
+            let origin = page_origin(pi, ph);
+            let mesh = if self.shape_preview.is_some() {
+                self.shape_preview.as_mut().unwrap().tessellate().clone()
+            } else {
+                self.live.as_mut().unwrap().1.tessellate().clone()
+            };
             painter.add(Shape::mesh(map_mesh(&mesh, |p| map(p + origin))));
         }
         if self.lasso.len() >= 2 {
@@ -4115,6 +4458,133 @@ impl CahierApp {
                     }
                 }
             }
+        }
+    }
+
+    fn sheet_tabs(&self, canvas: Rect) -> [(SheetEdge, Rect); 4] {
+        let page = self.page_in_view(canvas);
+        let Some(paper) = self.page_screen_rect(canvas, page) else {
+            return [
+                (SheetEdge::Left, Rect::NOTHING),
+                (SheetEdge::Right, Rect::NOTHING),
+                (SheetEdge::Top, Rect::NOTHING),
+                (SheetEdge::Bottom, Rect::NOTHING),
+            ];
+        };
+        if paper.width() < 8.0 || paper.height() < 8.0 {
+            return [
+                (SheetEdge::Left, Rect::NOTHING),
+                (SheetEdge::Right, Rect::NOTHING),
+                (SheetEdge::Top, Rect::NOTHING),
+                (SheetEdge::Bottom, Rect::NOTHING),
+            ];
+        }
+        [
+            (SheetEdge::Left, outward_band(paper, SheetEdge::Left)),
+            (SheetEdge::Right, outward_band(paper, SheetEdge::Right)),
+            (SheetEdge::Top, outward_band(paper, SheetEdge::Top)),
+            (SheetEdge::Bottom, outward_band(paper, SheetEdge::Bottom)),
+        ]
+    }
+
+    fn page_screen_rect(&self, canvas: Rect, page: usize) -> Option<Rect> {
+        let n = self.note.as_ref()?;
+        let (pw, ph) = n.page_size();
+        let origin = page_origin(page, ph);
+        let min = self.camera.to_screen(Pos2::new(origin.x, origin.y), canvas);
+        let max = self
+            .camera
+            .to_screen(Pos2::new(origin.x + pw, origin.y + ph), canvas);
+        Some(Rect::from_min_max(min, max))
+    }
+
+    fn sheet_tab_at(&self, screen: Pos2, canvas: Rect) -> Option<SheetEdge> {
+        if self.note.is_none() || canvas.width() < 10.0 {
+            return None;
+        }
+        self.sheet_tabs(canvas)
+            .into_iter()
+            .find(|(_, r)| r.contains(screen))
+            .map(|(e, _)| e)
+    }
+
+    /// Adds a strip. The clicked edge stays under the "+", and the ink slides.
+    fn grow_sheet(&mut self, edge: SheetEdge) {
+        let view = self.canvas_rect;
+        let span = match edge {
+            SheetEdge::Left | SheetEdge::Right => view.width(),
+            SheetEdge::Top | SheetEdge::Bottom => view.height(),
+        };
+        let step = (span * 0.45).clamp(200.0, 720.0);
+        let page_i = self.page_in_view(view);
+        self.push_snapshot();
+        let z = self.camera.zoom;
+        if let Some(n) = &mut self.note {
+            match edge {
+                SheetEdge::Right => n.page_w += step,
+                SheetEdge::Bottom => n.page_h += step,
+                SheetEdge::Left => {
+                    n.page_w += step;
+                    for p in &mut n.pages {
+                        p.translate(vec2(step, 0.0));
+                    }
+                }
+                SheetEdge::Top => {
+                    n.page_h += step;
+                    for p in &mut n.pages {
+                        p.translate(vec2(0.0, step));
+                    }
+                }
+            }
+        }
+        if let Some((_, live)) = &mut self.live {
+            match edge {
+                SheetEdge::Left => live.translate(vec2(step, 0.0)),
+                SheetEdge::Top => live.translate(vec2(0.0, step)),
+                _ => {}
+            }
+        }
+        if let Some(preview) = &mut self.shape_preview {
+            match edge {
+                SheetEdge::Left => preview.translate(vec2(step, 0.0)),
+                SheetEdge::Top => preview.translate(vec2(0.0, step)),
+                _ => {}
+            }
+        }
+        if let Some(anchor) = &mut self.shape_anchor {
+            match edge {
+                SheetEdge::Left => anchor.x += step,
+                SheetEdge::Top => anchor.y += step,
+                _ => {}
+            }
+        }
+        match edge {
+            SheetEdge::Right => self.camera.pan.x -= step * z,
+            SheetEdge::Left => {}
+            SheetEdge::Bottom => self.camera.pan.y -= (page_i as f32 + 1.0) * step * z,
+            SheetEdge::Top => self.camera.pan.y -= page_i as f32 * step * z,
+        }
+        self.lasso.clear();
+        self.mark_dirty();
+    }
+
+    fn paint_sheet_tabs(&self, ui: &Ui, painter: &Painter, canvas: Rect) {
+        if self.note.is_none() || canvas.width() < 10.0 {
+            return;
+        }
+        let hover = ui.input(|i| i.pointer.hover_pos());
+        let (wash, plus, wash_hot, plus_hot) = sheet_tab_colors(self.look.desk);
+        for (_, hit) in self.sheet_tabs(canvas) {
+            if !hit.is_positive() {
+                continue;
+            }
+            let hot = hover.is_some_and(|p| hit.contains(p));
+            paint_sheet_tab(
+                painter,
+                hit,
+                if hot { wash_hot } else { wash },
+                if hot { plus_hot } else { plus },
+            );
         }
     }
 
@@ -4229,8 +4699,8 @@ impl CahierApp {
         }
     }
 
-    fn paint_punches(&self, painter: &Painter, paper: Rect) {
-        let z = (paper.height() / PAGE_H).max(0.2);
+    fn paint_punches(&self, painter: &Painter, paper: Rect, zoom: f32) {
+        let z = zoom.clamp(0.35, 3.0);
         for k in 0..3 {
             let y = paper.min.y + paper.height() * (0.22 + k as f32 * 0.28);
             let c = pos2(paper.min.x + 22.0 * z, y);
@@ -4242,6 +4712,8 @@ impl CahierApp {
 
     fn paint_overlays(&mut self, ui: &mut Ui, rect: Rect) {
         let mut edited = false;
+        let want_focus = self.text_focus;
+        let mut took_focus = false;
         if let Some((pg, id)) = self.editing_text {
             let cam = self.camera;
             if let Some(note) = &mut self.note {
@@ -4254,23 +4726,36 @@ impl CahierApp {
                         let col = tx.color32();
                         Area::new(Id::new(("tx", id)))
                             .fixed_pos(min)
+                            .order(Order::Foreground)
+                            .constrain(false)
                             .show(ui.ctx(), |ui| {
                                 ui.set_min_size(size);
                                 let te = TextEdit::multiline(&mut tx.text)
+                                    .id(Id::new(("tx-edit", id)))
                                     .font(FontId::new(
                                         size_pt * cam.zoom,
                                         FontFamily::Name("serif".into()),
                                     ))
                                     .text_color(col)
                                     .desired_width(size.x)
+                                    .desired_rows(2)
+                                    .lock_focus(true)
                                     .frame(false);
-                                if ui.add(te).changed() {
+                                let r = ui.add(te);
+                                if r.changed() {
                                     edited = true;
+                                }
+                                if want_focus {
+                                    r.request_focus();
+                                    took_focus = true;
                                 }
                             });
                     }
                 }
             }
+        }
+        if took_focus {
+            self.text_focus = false;
         }
         if edited {
             self.dirty = true;
@@ -4282,6 +4767,12 @@ impl CahierApp {
         if self.cursor_off {
             ui.ctx().set_cursor_icon(CursorIcon::None);
             return;
+        }
+        if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
+            if self.sheet_tab_at(p, self.canvas_rect).is_some() {
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                return;
+            }
         }
         if !resp.hovered() {
             return;
@@ -4318,20 +4809,36 @@ impl CahierApp {
                 || d.get_temp::<Rect>(Id::new("top-rect"))
                     .map(|r| r.expand(4.0).contains(pos))
                     .unwrap_or(false)
+                || d.get_temp::<Rect>(Id::new("tin-rect"))
+                    .map(|r| r.expand(4.0).contains(pos))
+                    .unwrap_or(false)
+                || d.get_temp::<Rect>(Id::new("strip-rect"))
+                    .map(|r| r.expand(4.0).contains(pos))
+                    .unwrap_or(false)
         })
     }
 
-    /// Stylet → pointeur egui : hover + clics sur la chrome (trousse, règle, étagère).
+    /// Stylus to egui pointer: hover and clicks on the chrome (pencil case, ruler, shelf).
     fn inject_pen_pointer(&mut self, ctx: &Context, raw: &mut egui::RawInput) {
         let pen = self.tablet.snapshot();
         if pen.in_proximity || pen.down {
             if let Some(pos) = pen.pos {
                 raw.events.push(Event::PointerMoved(pos));
-                // Sur l’étagère : tout clic. Sur le pupitre : chrome seulement
-                // (la feuille reste gérée par le pont tablette).
+                // On the shelf, every click. On the lectern, chrome only,
+                // and only when the press began on the chrome, so a stroke
+                // drifting onto the pencil case stays ink.
+                if pen.pressed {
+                    self.pen_ui_grab = match self.scene {
+                        Scene::Shelf { .. } => true,
+                        Scene::Desk => Self::pen_over_chrome(ctx, pos),
+                    };
+                }
+                if !pen.down && !pen.pressed {
+                    self.pen_ui_grab = false;
+                }
                 let ui_click = match self.scene {
                     Scene::Shelf { .. } => true,
-                    Scene::Desk => Self::pen_over_chrome(ctx, pos),
+                    Scene::Desk => self.pen_ui_grab,
                 };
                 if ui_click {
                     let mods = raw.modifiers;
@@ -4350,13 +4857,17 @@ impl CahierApp {
                             pressed: false,
                             modifiers: mods,
                         });
+                        self.pen_ui_grab = false;
                     }
+                } else if pen.released {
+                    self.pen_ui_grab = false;
                 }
             }
             self.pen_was_prox = true;
         } else if self.pen_was_prox {
             raw.events.push(Event::PointerGone);
             self.pen_was_prox = false;
+            self.pen_ui_grab = false;
         }
     }
 
@@ -4483,10 +4994,93 @@ fn next_width(w: f32) -> f32 {
     WIDTHS[(i + 1) % WIDTHS.len()]
 }
 
-fn shaft(p: &egui::Painter, a: Pos2, b: Pos2, thick: f32, col: Color32) {
-    p.line_segment([a, b], Stroke::new(thick, col));
-    p.circle_filled(a, thick * 0.48, col);
-    p.circle_filled(b, thick * 0.48, col);
+fn same_rgb(a: Color32, b: Color32) -> bool {
+    a.r().abs_diff(b.r()) < 8 && a.g().abs_diff(b.g()) < 8 && a.b().abs_diff(b.b()) < 8
+}
+
+fn rgb_to_hsv(c: Color32) -> (f32, f32, f32) {
+    let r = c.r() as f32 / 255.0;
+    let g = c.g() as f32 / 255.0;
+    let b = c.b() as f32 / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let h = if d < 1e-5 {
+        0.0
+    } else if (max - r).abs() < 1e-5 {
+        (60.0 * ((g - b) / d) + 360.0) % 360.0
+    } else if (max - g).abs() < 1e-5 {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    let s = if max < 1e-5 { 0.0 } else { d / max };
+    (h / 360.0, s, max)
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> Color32 {
+    let h = ((h % 1.0) + 1.0) % 1.0 * 6.0;
+    let i = h.floor();
+    let f = h - i;
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - f * s);
+    let t = v * (1.0 - (1.0 - f) * s);
+    let (r, g, b) = match i as i32 {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    Color32::from_rgb(
+        (r * 255.0).round().clamp(0.0, 255.0) as u8,
+        (g * 255.0).round().clamp(0.0, 255.0) as u8,
+        (b * 255.0).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+fn paint_sv_field(p: &Painter, rect: Rect, hue: f32) {
+    let nx = 18;
+    let ny = 12;
+    let cw = rect.width() / nx as f32;
+    let ch = rect.height() / ny as f32;
+    for y in 0..ny {
+        for x in 0..nx {
+            let s = (x as f32 + 0.5) / nx as f32;
+            let v = 1.0 - (y as f32 + 0.5) / ny as f32;
+            let cell = Rect::from_min_size(
+                pos2(rect.min.x + x as f32 * cw, rect.min.y + y as f32 * ch),
+                vec2(cw + 0.4, ch + 0.4),
+            );
+            p.rect_filled(cell, 0, hsv_to_rgb(hue, s, v));
+        }
+    }
+    p.rect_stroke(
+        rect,
+        4,
+        Stroke::new(1.0_f32, Color32::from_white_alpha(28)),
+        StrokeKind::Inside,
+    );
+}
+
+fn paint_hue_bar(p: &Painter, rect: Rect) {
+    let n = 48;
+    let w = rect.width() / n as f32;
+    for i in 0..n {
+        let x = rect.min.x + i as f32 * w;
+        p.rect_filled(
+            Rect::from_min_size(pos2(x, rect.min.y), vec2(w + 0.5, rect.height())),
+            0,
+            hsv_to_rgb(i as f32 / n as f32, 0.95, 0.95),
+        );
+    }
+    p.rect_stroke(
+        rect,
+        3,
+        Stroke::new(1.0_f32, Color32::from_white_alpha(28)),
+        StrokeKind::Inside,
+    );
 }
 
 fn shade_rgb(c: Color32, k: f32) -> Color32 {
@@ -4499,54 +5093,6 @@ fn shade_rgb(c: Color32, k: f32) -> Color32 {
     )
 }
 
-/// Lucide trash-2 (ISC) — `assets/trash.svg`, teinté.
-fn raster_lucide_trash(color: Color32, px: u32) -> ColorImage {
-    use tiny_skia::{LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke as SkStroke, Transform};
-    let mut pm = Pixmap::new(px, px).expect("trash pixmap");
-    let mut paint = Paint::default();
-    paint.set_color_rgba8(color.r(), color.g(), color.b(), 255);
-    paint.anti_alias = true;
-    let stroke = SkStroke {
-        width: 2.0,
-        line_cap: LineCap::Round,
-        line_join: LineJoin::Round,
-        ..SkStroke::default()
-    };
-    let t = Transform::from_scale(px as f32 / 24.0, px as f32 / 24.0);
-    let stroke_line = |pm: &mut Pixmap, x0: f32, y0: f32, x1: f32, y1: f32| {
-        let mut pb = PathBuilder::new();
-        pb.move_to(x0, y0);
-        pb.line_to(x1, y1);
-        if let Some(path) = pb.finish() {
-            pm.stroke_path(&path, &paint, &stroke, t, None);
-        }
-    };
-    stroke_line(&mut pm, 3.0, 6.0, 21.0, 6.0);
-    let mut body = PathBuilder::new();
-    body.move_to(19.0, 6.0);
-    body.line_to(19.0, 20.0);
-    body.cubic_to(19.0, 21.0, 18.0, 22.0, 17.0, 22.0);
-    body.line_to(7.0, 22.0);
-    body.cubic_to(6.0, 22.0, 5.0, 21.0, 5.0, 20.0);
-    body.line_to(5.0, 6.0);
-    if let Some(path) = body.finish() {
-        pm.stroke_path(&path, &paint, &stroke, t, None);
-    }
-    let mut lid = PathBuilder::new();
-    lid.move_to(8.0, 6.0);
-    lid.line_to(8.0, 4.0);
-    lid.cubic_to(8.0, 3.0, 9.0, 2.0, 10.0, 2.0);
-    lid.line_to(14.0, 2.0);
-    lid.cubic_to(15.0, 2.0, 16.0, 3.0, 16.0, 4.0);
-    lid.line_to(16.0, 6.0);
-    if let Some(path) = lid.finish() {
-        pm.stroke_path(&path, &paint, &stroke, t, None);
-    }
-    stroke_line(&mut pm, 10.0, 11.0, 10.0, 17.0);
-    stroke_line(&mut pm, 14.0, 11.0, 14.0, 17.0);
-    ColorImage::from_rgba_premultiplied([px as usize, px as usize], pm.data())
-}
-
 fn mix_col(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     Color32::from_rgba_unmultiplied(
@@ -4557,28 +5103,143 @@ fn mix_col(a: Color32, b: Color32, t: f32) -> Color32 {
     )
 }
 
+fn hex6(c: Color32) -> String {
+    format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
+}
+
+/// SVG Repo trash-empty, tinted with the theme red.
+fn raster_trash_svg(rust: Color32, px: u32) -> ColorImage {
+    let paper = Color32::from_rgb(0xf3, 0xea, 0xd8);
+    let svg = include_str!("../assets/trash.svg")
+        .replace("#dddddd", &hex6(mix_col(rust, paper, 0.48)))
+        .replace("#bbbbbb", &hex6(mix_col(rust, paper, 0.22)))
+        .replace("#aaaaaa", &hex6(mix_col(rust, paper, 0.18)))
+        .replace("#888888", &hex6(rust))
+        .replace("#666666", &hex6(shade_rgb(rust, 0.72)))
+        .replace("#555555", &hex6(shade_rgb(rust, 0.52)))
+        .replace("#444444", &hex6(shade_rgb(rust, 0.40)))
+        .replace("#333333", &hex6(shade_rgb(rust, 0.28)));
+    raster_svg_scaled(&svg, px, 100.0)
+}
+
+fn raster_svg_scaled(svg: &str, px: u32, view: f32) -> ColorImage {
+    let tree =
+        resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default()).expect("svg");
+    const SS: u32 = 4;
+    let hi = px * SS;
+    let mut pm = tiny_skia::Pixmap::new(hi, hi).expect("svg pixmap");
+    let scale = hi as f32 / view;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pm.as_mut(),
+    );
+    let src = pm.data();
+    let mut dst = vec![0u8; (px * px * 4) as usize];
+    let n = SS * SS;
+    for y in 0..px {
+        for x in 0..px {
+            let mut acc = [0u32; 4];
+            for dy in 0..SS {
+                for dx in 0..SS {
+                    let i = (((y * SS + dy) * hi + x * SS + dx) * 4) as usize;
+                    acc[0] += src[i] as u32;
+                    acc[1] += src[i + 1] as u32;
+                    acc[2] += src[i + 2] as u32;
+                    acc[3] += src[i + 3] as u32;
+                }
+            }
+            let o = ((y * px + x) * 4) as usize;
+            dst[o] = (acc[0] / n) as u8;
+            dst[o + 1] = (acc[1] / n) as u8;
+            dst[o + 2] = (acc[2] / n) as u8;
+            dst[o + 3] = (acc[3] / n) as u8;
+        }
+    }
+    ColorImage::from_rgba_premultiplied([px as usize, px as usize], &dst)
+}
+
+/// 50% of the edge, centered. A bit shorter in thickness, set off from the sheet.
+fn outward_band(paper: Rect, edge: SheetEdge) -> Rect {
+    let gap = paper.height() * 0.10;
+    let thick = paper.height() * 0.22;
+    let along_h = paper.height() * 0.50;
+    let along_w = paper.width() * 0.50;
+    let cy = paper.center().y;
+    let cx = paper.center().x;
+    match edge {
+        SheetEdge::Left => Rect::from_min_max(
+            pos2(paper.min.x - gap - thick, cy - along_h * 0.5),
+            pos2(paper.min.x - gap, cy + along_h * 0.5),
+        ),
+        SheetEdge::Right => Rect::from_min_max(
+            pos2(paper.max.x + gap, cy - along_h * 0.5),
+            pos2(paper.max.x + gap + thick, cy + along_h * 0.5),
+        ),
+        SheetEdge::Top => Rect::from_min_max(
+            pos2(cx - along_w * 0.5, paper.min.y - gap - thick),
+            pos2(cx + along_w * 0.5, paper.min.y - gap),
+        ),
+        SheetEdge::Bottom => Rect::from_min_max(
+            pos2(cx - along_w * 0.5, paper.max.y + gap),
+            pos2(cx + along_w * 0.5, paper.max.y + gap + thick),
+        ),
+    }
+}
+
+fn sheet_tab_colors(desk: Color32) -> (Color32, Color32, Color32, Color32) {
+    let lum = desk.r() as u16 + desk.g() as u16 + desk.b() as u16;
+    if lum < 420 {
+        (
+            Color32::from_white_alpha(26),
+            Color32::from_white_alpha(210),
+            Color32::from_white_alpha(42),
+            Color32::from_white_alpha(240),
+        )
+    } else {
+        (
+            Color32::from_black_alpha(12),
+            Color32::from_black_alpha(70),
+            Color32::from_black_alpha(20),
+            Color32::from_black_alpha(110),
+        )
+    }
+}
+
+fn paint_sheet_tab(p: &Painter, rect: Rect, wash: Color32, plus: Color32) {
+    let short = rect.width().min(rect.height());
+    let radius = short * 0.10;
+    p.rect_filled(rect, radius, wash);
+    let c = rect.center();
+    let arm = short * 0.18;
+    let thick = (short * 0.018).max(1.0);
+    p.rect_filled(
+        Rect::from_center_size(c, vec2(arm * 2.0, thick)),
+        thick * 0.5,
+        plus,
+    );
+    p.rect_filled(
+        Rect::from_center_size(c, vec2(thick, arm * 2.0)),
+        thick * 0.5,
+        plus,
+    );
+}
+
 fn paint_plus(p: &egui::Painter, c: Pos2, fg: Color32) {
     p.rect_filled(Rect::from_center_size(c, vec2(16.0, 3.0)), 2.0, fg);
     p.rect_filled(Rect::from_center_size(c, vec2(3.0, 16.0)), 2.0, fg);
 }
 
-fn paint_back(p: &egui::Painter, c: Pos2, fg: Color32) {
-    let st = Stroke::new(2.15_f32, fg);
-    p.line_segment([pos2(c.x + 3.5, c.y - 7.2), pos2(c.x - 6.5, c.y)], st);
-    p.line_segment([pos2(c.x - 6.5, c.y), pos2(c.x + 3.5, c.y + 7.2)], st);
-    p.circle_filled(pos2(c.x - 6.5, c.y), 1.1, fg);
-}
-
 fn paint_more(p: &egui::Painter, c: Pos2, fg: Color32) {
-    for dy in [-6.2, 0.0, 6.2] {
-        p.circle_filled(pos2(c.x, c.y + dy), 1.7, fg);
+    for dy in [-7.4, 0.0, 7.4] {
+        p.circle_filled(pos2(c.x, c.y + dy), 2.1, fg);
     }
 }
 
 fn paint_fit(p: &egui::Painter, c: Pos2, fg: Color32) {
-    let st = Stroke::new(1.8_f32, fg);
-    let s = 6.4;
-    let m = 2.2;
+    let st = Stroke::new(2.0_f32, fg);
+    let s = 7.6;
+    let m = 2.6;
     p.line_segment([pos2(c.x - s, c.y - m), pos2(c.x - s, c.y - s)], st);
     p.line_segment([pos2(c.x - s, c.y - s), pos2(c.x - m, c.y - s)], st);
     p.line_segment([pos2(c.x + s, c.y - m), pos2(c.x + s, c.y - s)], st);
@@ -4590,27 +5251,27 @@ fn paint_fit(p: &egui::Painter, c: Pos2, fg: Color32) {
 }
 
 fn paint_zoom_in(p: &egui::Painter, c: Pos2, fg: Color32) {
-    p.circle_stroke(c, 8.4, Stroke::new(1.7_f32, fg));
-    p.rect_filled(Rect::from_center_size(c, vec2(9.0, 2.15)), 1.2, fg);
-    p.rect_filled(Rect::from_center_size(c, vec2(2.15, 9.0)), 1.2, fg);
+    p.circle_stroke(c, 9.8, Stroke::new(1.95_f32, fg));
+    p.rect_filled(Rect::from_center_size(c, vec2(10.6, 2.4)), 1.2, fg);
+    p.rect_filled(Rect::from_center_size(c, vec2(2.4, 10.6)), 1.2, fg);
 }
 
 fn paint_zoom_out(p: &egui::Painter, c: Pos2, fg: Color32) {
-    p.circle_stroke(c, 8.4, Stroke::new(1.7_f32, fg));
-    p.rect_filled(Rect::from_center_size(c, vec2(9.0, 2.15)), 1.2, fg);
+    p.circle_stroke(c, 9.8, Stroke::new(1.95_f32, fg));
+    p.rect_filled(Rect::from_center_size(c, vec2(10.6, 2.4)), 1.2, fg);
 }
 
 fn paint_paper_icon(p: &egui::Painter, c: Pos2, fg: Color32) {
     p.rect_stroke(
-        Rect::from_center_size(c, vec2(12.5, 15.5)),
-        3.6,
-        Stroke::new(1.6_f32, fg),
+        Rect::from_center_size(c, vec2(14.5, 18.0)),
+        4.0,
+        Stroke::new(1.8_f32, fg),
         StrokeKind::Inside,
     );
-    for dy in [-3.2, 0.0, 3.2] {
+    for dy in [-3.8, 0.0, 3.8] {
         p.line_segment(
-            [pos2(c.x - 3.6, c.y + dy), pos2(c.x + 3.6, c.y + dy)],
-            Stroke::new(1.35_f32, fg),
+            [pos2(c.x - 4.2, c.y + dy), pos2(c.x + 4.2, c.y + dy)],
+            Stroke::new(1.55_f32, fg),
         );
     }
 }
@@ -4649,37 +5310,6 @@ fn paint_undo(p: &egui::Painter, c: Pos2, fg: Color32) {
 
 fn paint_redo(p: &egui::Painter, c: Pos2, fg: Color32) {
     paint_curved_arrow(p, c, fg, -1.0);
-}
-
-fn paint_mode(p: &egui::Painter, c: Pos2, mode: NoteMode, fg: Color32) {
-    match mode {
-        NoteMode::Pupitre => {
-            let body = Rect::from_center_size(pos2(c.x, c.y + 1.4), vec2(9.2, 13.4));
-            p.rect_stroke(body, 4.5, Stroke::new(1.7_f32, fg), StrokeKind::Inside);
-            p.line_segment(
-                [pos2(c.x, c.y - 4.6), pos2(c.x, c.y + 0.6)],
-                Stroke::new(1.6_f32, fg),
-            );
-            p.circle_filled(pos2(c.x, c.y - 4.6), 1.15, fg);
-        }
-        NoteMode::Tablette => {
-            let tip = pos2(c.x + 1.4, c.y - 9.2);
-            let tail = pos2(c.x - 1.4, c.y + 8.6);
-            shaft(p, tail, tip, 2.7, fg);
-            p.circle_filled(tail, 2.0, fg);
-            let n = (tip - tail).normalized();
-            let side = vec2(-n.y, n.x);
-            p.add(egui::Shape::convex_polygon(
-                vec![
-                    tip + n * 3.2,
-                    tip - n * 0.4 + side * 2.0,
-                    tip - n * 0.4 - side * 2.0,
-                ],
-                fg,
-                Stroke::NONE,
-            ));
-        }
-    }
 }
 
 fn paint_tool(

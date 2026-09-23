@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-/// Dernière pression stylet (bits d'un f32). 0 = inconnue.
+/// Latest stylus pressure (bits of an f32). 0 = unknown.
 #[derive(Clone)]
 pub struct Pressure {
     bits: Arc<AtomicU32>,

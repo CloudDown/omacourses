@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,7 +16,15 @@ pub struct NoteMeta {
     pub cover: u8,
     #[serde(default)]
     pub emoji: String,
+    /// Shelf cell (gaps allowed), 0..SHELF_SLOTS.
+    #[serde(default)]
+    pub slot: u32,
 }
+
+/// Shelf grid: 5 columns × 3 rows.
+pub const SHELF_COLS: u32 = 5;
+pub const SHELF_ROWS: u32 = 3;
+pub const SHELF_SLOTS: u32 = SHELF_COLS * SHELF_ROWS;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -33,44 +42,15 @@ impl DockEdge {
     }
 }
 
-/// Posture du pupitre : clavier+souris, ou stylet+main.
+/// Old index field (lectern / tablet). Kept so existing JSON still loads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NoteMode {
-    /// Souris écrit, clavier pilote, espace panorama.
     #[default]
     #[serde(alias = "main")]
     Pupitre,
-    /// Stylet écrit, doigt pousse la feuille.
     #[serde(alias = "stylus", alias = "chiffon")]
     Tablette,
-}
-
-impl NoteMode {
-    pub fn other(self) -> Self {
-        match self {
-            Self::Pupitre => Self::Tablette,
-            Self::Tablette => Self::Pupitre,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Pupitre => "Desktop",
-            Self::Tablette => "Tablet",
-        }
-    }
-
-    pub fn hint(self) -> &'static str {
-        match self {
-            Self::Pupitre => "Desktop · mouse & keyboard",
-            Self::Tablette => "Tablet · stylus & palm",
-        }
-    }
-
-    pub fn is_tablette(self) -> bool {
-        matches!(self, Self::Tablette)
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -83,7 +63,7 @@ pub struct Index {
     pub dock: DockEdge,
     #[serde(default, alias = "hand")]
     pub mode: NoteMode,
-    /// `true` = tuto fermé (bouton seul).
+    /// `true` = tutorial folded away (button only).
     #[serde(default = "default_true")]
     pub fiche_pliee: bool,
 }
@@ -120,7 +100,9 @@ impl Library {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        Self { root, index }
+        let mut lib = Self { root, index };
+        lib.ensure_slots();
+        lib
     }
 
     pub fn save_index(&self) {
@@ -153,33 +135,116 @@ impl Library {
             meta.cover = note.cover;
             meta.emoji = note.emoji.clone();
         } else {
-            self.index.notes.push(NoteMeta {
-                id: note.id,
-                title: note.title.clone(),
-                updated: note.updated,
-                pinned: note.pinned,
-                cover: note.cover,
-                emoji: note.emoji.clone(),
-            });
+            let slot = self.first_free_slot();
+            self.index.notes.insert(
+                0,
+                NoteMeta {
+                    id: note.id,
+                    title: note.title.clone(),
+                    updated: note.updated,
+                    pinned: note.pinned,
+                    cover: note.cover,
+                    emoji: note.emoji.clone(),
+                    slot,
+                },
+            );
         }
-        self.index
-            .notes
-            .sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.updated.cmp(&a.updated)));
         self.save_index();
+    }
+
+    fn first_free_slot(&self) -> u32 {
+        let used: HashSet<u32> = self.index.notes.iter().map(|m| m.slot).collect();
+        (0..SHELF_SLOTS)
+            .find(|i| !used.contains(i))
+            .unwrap_or(SHELF_SLOTS)
+    }
+
+    fn ensure_slots(&mut self) {
+        let mut seen = HashSet::new();
+        let clash = self.index.notes.iter().any(|n| !seen.insert(n.slot));
+        let all_zero = self.index.notes.len() > 1 && self.index.notes.iter().all(|n| n.slot == 0);
+        if clash || all_zero {
+            for (i, n) in self.index.notes.iter_mut().enumerate() {
+                n.slot = i as u32;
+            }
+        }
+        let used: HashSet<u32> = self
+            .index
+            .notes
+            .iter()
+            .filter(|n| n.slot < SHELF_SLOTS)
+            .map(|n| n.slot)
+            .collect();
+        let mut free: Vec<u32> = (0..SHELF_SLOTS).filter(|i| !used.contains(i)).collect();
+        free.reverse();
+        let mut dirty = clash || all_zero;
+        for n in self.index.notes.iter_mut() {
+            if n.slot < SHELF_SLOTS {
+                continue;
+            }
+            if let Some(slot) = free.pop() {
+                n.slot = slot;
+                dirty = true;
+            }
+        }
+        if dirty {
+            self.save_index();
+        }
+    }
+
+    /// Places notebooks on cells `dest`, `dest+1`, … (swap if occupied).
+    pub fn place_at(&mut self, moving: &[Uuid], dest: u32) {
+        if moving.is_empty() {
+            return;
+        }
+        let dest = dest.min(SHELF_SLOTS.saturating_sub(1));
+        let old: Vec<u32> = moving
+            .iter()
+            .filter_map(|id| {
+                self.index
+                    .notes
+                    .iter()
+                    .find(|n| n.id == *id)
+                    .map(|n| n.slot)
+            })
+            .collect();
+        for (k, id) in moving.iter().enumerate() {
+            let target = dest.saturating_add(k as u32);
+            if target >= SHELF_SLOTS {
+                continue;
+            }
+            let prev = old.get(k).copied();
+            if let Some(other) = self
+                .index
+                .notes
+                .iter_mut()
+                .find(|n| n.slot == target && !moving.contains(&n.id))
+            {
+                other.slot = prev.unwrap_or(target);
+            }
+            if let Some(n) = self.index.notes.iter_mut().find(|n| n.id == *id) {
+                n.slot = target;
+            }
+        }
+        self.save_index();
+    }
+
+    pub fn bring_front(&mut self, id: Uuid) {
+        if let Some(i) = self.index.notes.iter().position(|m| m.id == id) {
+            if i == 0 {
+                return;
+            }
+            let m = self.index.notes.remove(i);
+            self.index.notes.insert(0, m);
+            self.save_index();
+        }
     }
 
     pub fn insert_new(&mut self, note: &Note) {
         self.save_note(note);
     }
 
-    /// Supprime définitivement (hors corbeille).
-    #[allow(dead_code)]
-    pub fn delete_note(&mut self, id: Uuid) {
-        self.trash_note(id);
-        self.purge_trashed(id);
-    }
-
-    /// Met le cahier dans la corbeille (fichiers conservés).
+    /// Moves the notebook into the trash (files kept).
     pub fn trash_note(&mut self, id: Uuid) {
         if let Some(i) = self.index.notes.iter().position(|m| m.id == id) {
             let meta = self.index.notes.remove(i);
@@ -193,10 +258,12 @@ impl Library {
         if let Some(i) = self.index.trash.iter().position(|m| m.id == id) {
             let meta = self.index.trash.remove(i);
             self.index.notes.retain(|m| m.id != id);
+            let used: HashSet<u32> = self.index.notes.iter().map(|m| m.slot).collect();
+            let mut meta = meta;
+            if meta.slot >= SHELF_SLOTS || used.contains(&meta.slot) {
+                meta.slot = self.first_free_slot();
+            }
             self.index.notes.push(meta);
-            self.index
-                .notes
-                .sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.updated.cmp(&a.updated)));
             self.save_index();
         }
     }
@@ -214,32 +281,6 @@ impl Library {
             let _ = fs::remove_dir_all(self.note_dir(id));
         }
         self.save_index();
-    }
-
-    pub fn duplicate(&mut self, id: Uuid) -> Option<Note> {
-        let mut note = self.load_note(id)?;
-        note.id = Uuid::new_v4();
-        note.title = format!("{} (copy)", note.title);
-        note.touch();
-        for page in &mut note.pages {
-            for s in &mut page.strokes {
-                s.id = Uuid::new_v4();
-            }
-            for t in &mut page.texts {
-                t.id = Uuid::new_v4();
-            }
-            for im in &mut page.images {
-                let old = im.file.clone();
-                im.id = Uuid::new_v4();
-                im.file = format!("{}.png", im.id);
-                let src = self.note_dir(id).join("media").join(&old);
-                let dst = self.note_dir(note.id).join("media");
-                let _ = fs::create_dir_all(&dst);
-                let _ = fs::copy(src, dst.join(&im.file));
-            }
-        }
-        self.save_note(&note);
-        Some(note)
     }
 
     pub fn write_media(&self, note_id: Uuid, bytes: &[u8]) -> Option<String> {

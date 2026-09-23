@@ -1,4 +1,4 @@
-//! Encre vectorielle : points, pression, ruban, formes.
+//! Vector ink: points, pressure, ribbon, shapes.
 
 use egui::{epaint::Vertex, Color32, Mesh, Pos2, Stroke as EStroke, TextureId, Vec2};
 use serde::{Deserialize, Serialize};
@@ -361,7 +361,7 @@ pub fn premultiply(c: Color32) -> Color32 {
     )
 }
 
-/// Pression hardware, sinon vitesse (plume : lent = plus gras).
+/// Hardware pressure, otherwise speed (fountain pen: slow means fatter).
 pub fn mixed_pressure(nib: Nib, hw: Option<f32>, speed: f32) -> f32 {
     if let Some(p) = hw {
         return p.clamp(0.08, 1.0);
@@ -379,32 +379,77 @@ pub fn mixed_pressure(nib: Nib, hw: Option<f32>, speed: f32) -> f32 {
     }
 }
 
-pub fn maybe_snap_shape(stroke: &InkStroke, force_line: bool) -> Option<InkStroke> {
+pub fn maybe_snap_shape(stroke: &InkStroke) -> Option<InkStroke> {
     if stroke.points.len() < 6 {
-        if force_line && stroke.points.len() >= 2 {
-            return Some(line_stroke(stroke));
-        }
         return None;
     }
-    if force_line {
+    if stroke_closed(stroke) {
+        return best_closed_shape(stroke);
+    }
+    if let Some(s) = fit_arrow(stroke) {
+        return Some(s);
+    }
+    if line_fits(stroke) {
         return Some(line_stroke(stroke));
     }
+    None
+}
+
+/// Picks the closest closed shape (the best fit, not the first that passes).
+fn best_closed_shape(stroke: &InkStroke) -> Option<InkStroke> {
+    let mut best: Option<(f32, InkStroke)> = None;
+    let mut consider = |score: f32, s: Option<InkStroke>| {
+        let Some(s) = s else {
+            return;
+        };
+        if best.as_ref().map(|(e, _)| score < *e).unwrap_or(true) {
+            best = Some((score, s));
+        }
+    };
+    if let Some((score, s)) = fit_triangle_scored(stroke) {
+        consider(score, Some(s));
+    }
+    if let Some((score, s)) = fit_diamond_scored(stroke) {
+        consider(score, Some(s));
+    }
+    if let Some((score, s)) = fit_rect_scored(stroke) {
+        consider(score, Some(s));
+    }
+    if let Some((score, s)) = fit_ellipse_scored(stroke) {
+        consider(score, Some(s));
+    }
+    best.map(|(_, s)| s)
+}
+
+fn stroke_closed(stroke: &InkStroke) -> bool {
     let start = stroke.points[0].pos();
     let end = stroke.points.last().unwrap().pos();
-    let closed = start.distance(end) < 36.0;
-    if !closed {
-        if line_error(stroke) < 3.2 {
-            return Some(line_stroke(stroke));
-        }
-        return None;
+    let gap = start.distance(end);
+    let path: f32 = stroke
+        .points
+        .windows(2)
+        .map(|w| w[0].pos().distance(w[1].pos()))
+        .sum();
+    if path < 40.0 {
+        return false;
     }
-    if let Some(s) = fit_rect(stroke) {
-        return Some(s);
+    let diag = stroke
+        .bbox()
+        .map(|(a, b)| a.distance(b))
+        .unwrap_or(path);
+    // Approximate closure: a real gap at the end of the stroke is allowed.
+    gap < (path * 0.38).min(diag * 0.42).max(56.0) || (gap < 90.0 && path > 70.0)
+}
+
+fn line_fits(stroke: &InkStroke) -> bool {
+    let a = stroke.points[0].pos();
+    let b = stroke.points.last().unwrap().pos();
+    let len = a.distance(b);
+    if len < 28.0 {
+        return false;
     }
-    if let Some(s) = fit_circle(stroke) {
-        return Some(s);
-    }
-    None
+    let allow = (len * 0.07).clamp(8.0, 22.0);
+    line_error(stroke) < allow
 }
 
 fn line_stroke(stroke: &InkStroke) -> InkStroke {
@@ -434,46 +479,106 @@ fn line_error(stroke: &InkStroke) -> f32 {
     e
 }
 
-fn fit_circle(stroke: &InkStroke) -> Option<InkStroke> {
-    let n = stroke.points.len() as f32;
-    let c = stroke
-        .points
-        .iter()
-        .fold(Vec2::ZERO, |acc, p| acc + p.pos().to_vec2())
-        / n;
-    let c = Pos2::new(c.x, c.y);
-    let r = stroke
-        .points
-        .iter()
-        .map(|p| p.pos().distance(c))
-        .sum::<f32>()
-        / n;
-    if r < 12.0 {
-        return None;
+fn poly_score(stroke: &InkStroke, verts: &[Pos2]) -> f32 {
+    if verts.len() < 2 || stroke.points.is_empty() {
+        return f32::MAX;
     }
-    let err = stroke
-        .points
-        .iter()
-        .map(|p| (p.pos().distance(c) - r).abs())
-        .fold(0.0f32, f32::max);
-    if err > r * 0.18 {
-        return None;
+    let mut sum = 0.0f32;
+    let mut worst = 0.0f32;
+    for p in &stroke.points {
+        let mut d = f32::MAX;
+        for i in 0..verts.len() {
+            let a = verts[i];
+            let b = verts[(i + 1) % verts.len()];
+            d = d.min(dist2_seg(p.pos(), a, b).sqrt());
+        }
+        sum += d;
+        worst = worst.max(d);
     }
-    let mut s = stroke.clone();
-    s.id = Uuid::new_v4();
-    s.points = circle_pts(c, r, 48)
-        .into_iter()
-        .map(|p| InkPoint::new(p, 1.0))
-        .collect();
-    s.mesh = None;
-    Some(s)
+    let mean = sum / stroke.points.len() as f32;
+    mean * 0.7 + worst * 0.3
 }
 
-fn fit_rect(stroke: &InkStroke) -> Option<InkStroke> {
+fn stroke_poly(proto: &InkStroke, verts: &[Pos2], closed: bool, steps: usize) -> InkStroke {
+    let mut pts = Vec::new();
+    let n = if closed {
+        verts.len()
+    } else {
+        verts.len().saturating_sub(1)
+    };
+    for i in 0..n {
+        let a = verts[i];
+        let b = verts[(i + 1) % verts.len()];
+        for k in 0..=steps {
+            if k == 0 && i > 0 {
+                continue;
+            }
+            let t = k as f32 / steps as f32;
+            pts.push(InkPoint::new(a.lerp(b, t), 1.0));
+        }
+    }
+    let mut s = proto.clone();
+    s.id = Uuid::new_v4();
+    s.points = pts;
+    s.mesh = None;
+    s
+}
+
+fn fit_ellipse_scored(stroke: &InkStroke) -> Option<(f32, InkStroke)> {
     let (min, max) = stroke.bbox()?;
     let w = max.x - min.x;
     let h = max.y - min.y;
-    if w < 20.0 || h < 20.0 {
+    if w < 24.0 || h < 24.0 {
+        return None;
+    }
+    // Pulled in a little: a freehand stroke often spills past the true oval.
+    let pad = 0.04;
+    let rx = w * 0.5 * (1.0 - pad);
+    let ry = h * 0.5 * (1.0 - pad);
+    let c = Pos2::new((min.x + max.x) * 0.5, (min.y + max.y) * 0.5);
+    let mut sum = 0.0f32;
+    let mut worst = 0.0f32;
+    for p in &stroke.points {
+        let dx = (p.x - c.x) / rx.max(1.0);
+        let dy = (p.y - c.y) / ry.max(1.0);
+        let e = ((dx * dx + dy * dy).sqrt() - 1.0).abs();
+        sum += e;
+        worst = worst.max(e);
+    }
+    let mean = sum / stroke.points.len() as f32;
+    // Very tolerant: "almost an oval" should pass.
+    if mean > 0.28 || worst > 0.55 {
+        return None;
+    }
+    let aspect = (rx / ry).max(ry / rx);
+    let pts: Vec<InkPoint> = if aspect < 1.12 {
+        let r = (rx + ry) * 0.5;
+        circle_pts(c, r, 48)
+            .into_iter()
+            .map(|p| InkPoint::new(p, 1.0))
+            .collect()
+    } else {
+        (0..56)
+            .map(|i| {
+                let a = i as f32 / 56.0 * std::f32::consts::TAU;
+                InkPoint::new(Pos2::new(c.x + a.cos() * rx, c.y + a.sin() * ry), 1.0)
+            })
+            .collect()
+    };
+    let mut s = stroke.clone();
+    s.id = Uuid::new_v4();
+    s.points = pts;
+    s.mesh = None;
+    // Score normalized by size so it can be compared with polygons.
+    let scale = rx.min(ry).max(1.0);
+    Some(((mean * 0.65 + worst * 0.35) * scale, s))
+}
+
+fn fit_rect_scored(stroke: &InkStroke) -> Option<(f32, InkStroke)> {
+    let (min, max) = stroke.bbox()?;
+    let w = max.x - min.x;
+    let h = max.y - min.y;
+    if w < 18.0 || h < 18.0 {
         return None;
     }
     let corners = [
@@ -482,25 +587,250 @@ fn fit_rect(stroke: &InkStroke) -> Option<InkStroke> {
         Pos2::new(max.x, max.y),
         Pos2::new(min.x, max.y),
     ];
-    let mut err = 0.0f32;
-    for p in &stroke.points {
-        let d = corners
-            .windows(2)
-            .chain(std::iter::once([corners[3], corners[0]].as_slice()))
-            .map(|s| dist2_seg(p.pos(), s[0], s[1]).sqrt())
-            .fold(f32::MAX, f32::min);
-        err = err.max(d);
-    }
-    if err > 14.0 {
+    let score = poly_score(stroke, &corners);
+    let allow = (w.min(h) * 0.18).clamp(16.0, 40.0);
+    if score > allow {
         return None;
     }
-    let mut pts = Vec::new();
-    let seq = [corners[0], corners[1], corners[2], corners[3], corners[0]];
-    for w in seq.windows(2) {
-        for i in 0..=8 {
-            let t = i as f32 / 8.0;
-            pts.push(InkPoint::new(w[0].lerp(w[1], t), 1.0));
+    Some((score, stroke_poly(stroke, &corners, true, 8)))
+}
+
+fn fit_diamond_scored(stroke: &InkStroke) -> Option<(f32, InkStroke)> {
+    let (min, max) = stroke.bbox()?;
+    let w = max.x - min.x;
+    let h = max.y - min.y;
+    if w < 24.0 || h < 24.0 {
+        return None;
+    }
+    let cx = (min.x + max.x) * 0.5;
+    let cy = (min.y + max.y) * 0.5;
+    let verts = [
+        Pos2::new(cx, min.y),
+        Pos2::new(max.x, cy),
+        Pos2::new(cx, max.y),
+        Pos2::new(min.x, cy),
+    ];
+    let score = poly_score(stroke, &verts);
+    let allow = (w.min(h) * 0.18).clamp(16.0, 42.0);
+    if score > allow {
+        return None;
+    }
+    let rect_corners = [
+        Pos2::new(min.x, min.y),
+        Pos2::new(max.x, min.y),
+        Pos2::new(max.x, max.y),
+        Pos2::new(min.x, max.y),
+    ];
+    let corner_gap = rect_corners
+        .iter()
+        .map(|c| {
+            stroke
+                .points
+                .iter()
+                .map(|p| p.pos().distance(*c))
+                .fold(f32::MAX, f32::min)
+        })
+        .fold(0.0f32, f32::min);
+    if corner_gap < (w.min(h) * 0.08).clamp(6.0, 22.0) {
+        return None;
+    }
+    Some((score, stroke_poly(stroke, &verts, true, 8)))
+}
+
+fn fit_triangle_scored(stroke: &InkStroke) -> Option<(f32, InkStroke)> {
+    let (min, max) = stroke.bbox()?;
+    let w = max.x - min.x;
+    let h = max.y - min.y;
+    if w < 28.0 || h < 28.0 {
+        return None;
+    }
+    let verts = triangle_verts(stroke)?;
+    let score = poly_score(stroke, &verts);
+    let allow = (w.min(h) * 0.22).clamp(18.0, 48.0);
+    if score > allow {
+        return None;
+    }
+    Some((score, stroke_poly(stroke, &verts, true, 10)))
+}
+
+fn triangle_verts(stroke: &InkStroke) -> Option<[Pos2; 3]> {
+    // 1) Corners from a sharp turn
+    if let Some(v) = triangle_from_turns(stroke) {
+        return Some(v);
+    }
+    // 2) Fallback: largest area among samples
+    let n = stroke.points.len();
+    let step = (n / 32).max(1);
+    let samples: Vec<Pos2> = stroke
+        .points
+        .iter()
+        .step_by(step)
+        .map(|p| p.pos())
+        .collect();
+    if samples.len() < 3 {
+        return None;
+    }
+    let mut best = None;
+    let mut best_area = 0.0f32;
+    for i in 0..samples.len() {
+        for j in (i + 1)..samples.len() {
+            for k in (j + 1)..samples.len() {
+                let a = samples[i];
+                let b = samples[j];
+                let c = samples[k];
+                let area = ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).abs() * 0.5;
+                if area > best_area {
+                    best_area = area;
+                    best = Some([a, b, c]);
+                }
+            }
         }
+    }
+    let verts = best?;
+    let (min, max) = stroke.bbox()?;
+    let box_area = (max.x - min.x).max(1.0) * (max.y - min.y).max(1.0);
+    if best_area < box_area * 0.16 {
+        return None;
+    }
+    Some(order_triangle(verts))
+}
+
+fn triangle_from_turns(stroke: &InkStroke) -> Option<[Pos2; 3]> {
+    let pts: Vec<Pos2> = stroke.points.iter().map(|p| p.pos()).collect();
+    if pts.len() < 9 {
+        return None;
+    }
+    let mut corners: Vec<(f32, Pos2)> = Vec::new();
+    let win = (pts.len() / 18).clamp(2, 8);
+    for i in win..(pts.len() - win) {
+        let a = pts[i - win];
+        let b = pts[i];
+        let c = pts[i + win];
+        let v1 = (a - b).normalized();
+        let v2 = (c - b).normalized();
+        let cross = v1.x * v2.y - v1.y * v2.x;
+        let dot = (v1.x * v2.x + v1.y * v2.y).clamp(-1.0, 1.0);
+        let turn = cross.atan2(dot).abs();
+        if turn > 0.55 {
+            corners.push((turn, b));
+        }
+    }
+    // Add start / end if the stroke is almost closed.
+    corners.push((1.2, pts[0]));
+    if let Some(last) = pts.last() {
+        if last.distance(pts[0]) > 8.0 {
+            corners.push((1.0, *last));
+        }
+    }
+    corners.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut picked: Vec<Pos2> = Vec::new();
+    let (min, max) = stroke.bbox()?;
+    let min_sep = (min.distance(max) * 0.18).max(24.0);
+    for (_, p) in corners {
+        if picked.iter().all(|q| q.distance(p) >= min_sep) {
+            picked.push(p);
+        }
+        if picked.len() == 3 {
+            break;
+        }
+    }
+    if picked.len() < 3 {
+        return None;
+    }
+    let verts = [picked[0], picked[1], picked[2]];
+    let area = ((verts[1].x - verts[0].x) * (verts[2].y - verts[0].y)
+        - (verts[1].y - verts[0].y) * (verts[2].x - verts[0].x))
+        .abs()
+        * 0.5;
+    let box_area = (max.x - min.x).max(1.0) * (max.y - min.y).max(1.0);
+    if area < box_area * 0.14 {
+        return None;
+    }
+    Some(order_triangle(verts))
+}
+
+fn order_triangle(verts: [Pos2; 3]) -> [Pos2; 3] {
+    let c = Pos2::new(
+        (verts[0].x + verts[1].x + verts[2].x) / 3.0,
+        (verts[0].y + verts[1].y + verts[2].y) / 3.0,
+    );
+    let mut ordered = verts;
+    ordered.sort_by(|a, b| {
+        let aa = (a.y - c.y).atan2(a.x - c.x);
+        let bb = (b.y - c.y).atan2(b.x - c.x);
+        aa.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    ordered
+}
+
+fn fit_arrow(stroke: &InkStroke) -> Option<InkStroke> {
+    let n = stroke.points.len();
+    if n < 12 {
+        return None;
+    }
+    let start = stroke.points[0].pos();
+    let tip = stroke
+        .points
+        .iter()
+        .map(|p| p.pos())
+        .max_by(|a, b| {
+            a.distance(start)
+                .partial_cmp(&b.distance(start))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+    let shaft = tip - start;
+    let len = shaft.length();
+    if len < 56.0 {
+        return None;
+    }
+    let dir = shaft / len;
+    let nrm = rot90(dir);
+    let shaft_end = (n as f32 * 0.68) as usize;
+    let mut shaft_err = 0.0f32;
+    for p in &stroke.points[..shaft_end.max(2)] {
+        shaft_err = shaft_err.max(dist2_seg(p.pos(), start, tip).sqrt());
+    }
+    if shaft_err > (len * 0.08).clamp(10.0, 24.0) {
+        return None;
+    }
+    let mut left = 0.0f32;
+    let mut right = 0.0f32;
+    let head_from = ((n as f32 * 0.55) as usize).min(n - 2);
+    for p in &stroke.points[head_from..] {
+        let along = (p.pos() - start).dot(dir);
+        if along < len * 0.55 {
+            continue;
+        }
+        let side = (p.pos() - start).dot(nrm);
+        if side > left {
+            left = side;
+        }
+        if -side > right {
+            right = -side;
+        }
+    }
+    let head_w = left.min(right);
+    if head_w < (len * 0.06).clamp(8.0, 32.0) {
+        return None;
+    }
+    if left.max(right) > head_w * 3.2 {
+        return None;
+    }
+    let base = tip - dir * (head_w * 1.55).clamp(18.0, len * 0.35);
+    let wing = head_w * 1.05;
+    let mut pts = Vec::new();
+    for i in 0..8 {
+        let t = i as f32 / 8.0;
+        pts.push(InkPoint::new(start.lerp(tip, t), 1.0));
+    }
+    for i in 1..=6 {
+        let t = i as f32 / 6.0;
+        pts.push(InkPoint::new(tip.lerp(base + nrm * wing, t), 1.0));
+    }
+    pts.push(InkPoint::new(tip, 1.0));
+    for i in 1..=6 {
+        let t = i as f32 / 6.0;
+        pts.push(InkPoint::new(tip.lerp(base - nrm * wing, t), 1.0));
     }
     let mut s = stroke.clone();
     s.id = Uuid::new_v4();

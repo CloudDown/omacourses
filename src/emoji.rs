@@ -1,5 +1,5 @@
-//! Icônes de dossier. Noto Color Emoji est une bitmap CBDT (PNG), sans contours :
-//! egui ne la rastérise pas. On catalogue tous les glyphes et on décode à la demande.
+//! Folder icons. Noto Color Emoji is a CBDT bitmap (PNG), with no outlines:
+//! egui will not rasterize it. We catalog every glyph and decode on demand.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,7 +16,7 @@ pub struct Glyph {
 pub struct Atlas {
     font: Option<FontBytes>,
     glyphs: HashMap<char, Glyph>,
-    /// Tous les emojis colorés disponibles, ordre Unicode.
+    /// Every available color emoji, in Unicode order.
     catalog: Vec<char>,
 }
 
@@ -59,16 +59,8 @@ impl Atlas {
 
     pub fn key(&self, emoji: &str) -> Option<char> {
         emoji.chars().find(|ch| {
-            *ch != '\u{fe0f}'
-                && *ch != '\u{fe0e}'
-                && *ch != '\u{200d}'
-                && self.catalog.contains(ch)
+            *ch != '\u{fe0f}' && *ch != '\u{fe0e}' && *ch != '\u{200d}' && self.catalog.contains(ch)
         })
-    }
-
-    #[allow(dead_code)]
-    pub fn get(&self, emoji: &str) -> Option<&Glyph> {
-        self.key(emoji).and_then(|ch| self.glyphs.get(&ch))
     }
 }
 
@@ -153,18 +145,18 @@ impl FontBytes {
 }
 
 fn usable(cp: u32) -> bool {
-    // Variation selectors, ZWJ, tags — pas des icônes seuls.
+    // Variation selectors, ZWJ, tags — not icons on their own.
     if matches!(cp, 0x200D | 0xFE0E | 0xFE0F | 0x20E3) {
         return false;
     }
     if (0xE0020..=0xE007F).contains(&cp) {
         return false;
     }
-    // Privé / tags régionaux seuls peu utiles en grille.
+    // Private use / lone regional tags are useless in the grid.
     if (0xE000..=0xF8FF).contains(&cp) {
         return false;
     }
-    // Assez haut pour les symboles, ou bloc dingbat / emoji.
+    // High enough for symbols, or a dingbat / emoji block.
     cp >= 0x00A9 || (0x203C..=0x3299).contains(&cp)
 }
 
@@ -278,10 +270,10 @@ fn read_u32(data: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?))
 }
 
-/// Favoris affichés en tête de casse.
+/// Favorites shown at the head of the type case.
 pub const FAVORITES: &[&str] = &[
-    "📝", "📕", "📗", "📘", "📙", "📒", "📓", "✨", "💡", "🎯", "⭐", "🔥", "🌙", "☕", "🎵",
-    "📐", "🧪", "🧠", "💼", "🗂️", "📌", "🖤", "🌿", "🚀", "💎", "🔮",
+    "📝", "📕", "📗", "📘", "📙", "📒", "📓", "✨", "💡", "🎯", "⭐", "🔥", "🌙", "☕", "🎵", "📐",
+    "🧪", "🧠", "💼", "🗂️", "📌", "🖤", "🌿", "🚀", "💎", "🔮",
 ];
 
 #[cfg(test)]

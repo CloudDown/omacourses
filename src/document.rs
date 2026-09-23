@@ -4,12 +4,10 @@ use egui::{Color32, Pos2, Vec2};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Feuille fixe, indépendante de la fenêtre (environ trois A4).
-pub const PAGE_W: f32 = 794.0 * 3.0;
-pub const PAGE_H: f32 = 1123.0 * 3.0;
+/// Landscape A4 sheet, independent of the window.
+pub const PAGE_W: f32 = 1123.0;
+pub const PAGE_H: f32 = 794.0;
 pub const PAGE_GAP: f32 = 56.0;
-/// À l’ouverture, on ne montre qu’un coin : `1/PAGE_SPAN` de la feuille.
-pub const PAGE_SPAN: f32 = 3.0;
 
 fn default_page_w() -> f32 {
     PAGE_W
@@ -137,6 +135,20 @@ impl Default for Page {
     }
 }
 
+impl Page {
+    pub fn translate(&mut self, d: Vec2) {
+        for s in &mut self.strokes {
+            s.translate(d);
+        }
+        for t in &mut self.texts {
+            t.translate(d);
+        }
+        for im in &mut self.images {
+            im.translate(d);
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Note {
     pub id: Uuid,
@@ -179,11 +191,6 @@ impl Note {
 
     pub fn touch(&mut self) {
         self.updated = Utc::now();
-    }
-
-    pub fn add_page(&mut self) {
-        self.pages.push(Page::default());
-        self.touch();
     }
 }
 

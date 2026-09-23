@@ -36,20 +36,19 @@ Examples:
   cahier --data-dir
 
 Gestures (inside a notebook):
-  k  desktop (keyboard+mouse) ↔ tablet (stylus+hand)
   p felt-tip   b fountain   c pencil   h highlighter
   e stroke eraser   shift+e area eraser
   l lasso   t text   i image
   [ ] thickness   1-9 ink   m paper
   + − zoom   0 / corners = fit to screen
-  desktop: mouse writes · space pans · right-click = last eraser
-  tablet: stylus writes · finger pans · two-finger tap = undo
+  mouse writes · space pans · right-click = last eraser
+  stylus in range: stylus writes · finger pans · two-finger tap = undo
   trackpad: pinch or two fingers (vertical) = zoom
   screen pinch / ctrl+scroll zoom
   stylus button = last eraser (hold)   air-click = pen ↔ eraser
   2nd button = lasso (hold)
   drag the pencil-case handle → top / bottom / sides
-  shift released after a stroke ≈ shape (line, circle, rectangle)
+  hold the pen still ~1s ≈ line, arrow, triangle, square, diamond, ellipse, circle
   ctrl+z/y   ctrl+e png   ctrl+shift+e pdf
 ";
 

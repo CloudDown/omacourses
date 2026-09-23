@@ -1,8 +1,8 @@
-//! Pont Wayland tablette + pavé tactile.
+//! Wayland bridge for the tablet and the trackpad.
 //!
-//! winit 0.30 n’écoute pas `zwp_tablet_manager_v2` ni les pincements
-//! `zwp_pointer_gestures_v1` (Linux). On se greffe sur le `wl_display`
-//! d’eframe (guest) : stylet (tip / pression) et pinch du pad clavier.
+//! winit 0.30 does not listen to `zwp_tablet_manager_v2` or to
+//! `zwp_pointer_gestures_v1` pinches (Linux). We attach to eframe's
+//! `wl_display` (guest): stylus tip and pressure, and pinch on the keyboard pad.
 
 use std::collections::HashSet;
 
@@ -42,13 +42,13 @@ pub struct PenSnapshot {
     pub pressed: bool,
     pub released: bool,
     pub eraser: bool,
-    /// Bouton 2 tenu → lasso le temps du geste.
+    /// Button 2 held: lasso for the length of the gesture.
     pub lasso_btn: bool,
-    /// Clic bouton 1 en l’air (proximité, sans poser la pointe).
+    /// Button 1 click in the air (in proximity, tip not down).
     pub air_toggle: bool,
     pub pressure: Option<f32>,
     pub in_proximity: bool,
-    /// Facteur de zoom du pincement pavé (1.0 = aucun), relatif à cette frame.
+    /// Trackpad pinch zoom factor (1.0 = none), relative to this frame.
     pub pinch_zoom: f32,
     pub pinch_pan: Vec2,
     pub pinching: bool,
@@ -103,7 +103,7 @@ struct TabletState {
     eraser_tool: bool,
     stylus_btn: bool,
     stylus2_btn: bool,
-    /// Down vu pendant que le bouton 1 était tenu — pas un clic en l’air.
+    /// Down seen while button 1 was held, so this is a tip press and not an air click.
     stylus_btn_saw_down: bool,
     air_toggle: bool,
     pressure: Option<f32>,
@@ -131,7 +131,7 @@ impl TabletBridge {
         self.inner.is_some() && !self.dead
     }
 
-    /// Attache le `wl_display` (une fois). Appeler depuis `update` avec le `Frame`.
+    /// Attaches the `wl_display` (once). Call from `update` with the `Frame`.
     pub fn ensure(&mut self, frame: &eframe::Frame) {
         if self.dead || self.inner.is_some() {
             return;
@@ -142,7 +142,7 @@ impl TabletBridge {
         }
     }
 
-    /// Lit les événements Wayland. Appeler depuis `raw_input_hook` (avant egui).
+    /// Reads Wayland events. Call from `raw_input_hook` (before egui).
     pub fn pump_events(&mut self) {
         if self.dead {
             return;
@@ -163,12 +163,6 @@ impl TabletBridge {
             return;
         }
         let _ = inner.conn.flush();
-    }
-
-    #[allow(dead_code)]
-    pub fn pump(&mut self, frame: &eframe::Frame) {
-        self.ensure(frame);
-        self.pump_events();
     }
 
     pub fn snapshot(&self) -> PenSnapshot {

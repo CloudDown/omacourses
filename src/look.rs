@@ -1,5 +1,5 @@
-//! Chrome du pupitre = palette Omarchy / terminal.
-//! Source : `~/.local/state/omarchy/current/theme/` (le même staging que Alacritty).
+//! Lectern chrome = the Omarchy / terminal palette.
+//! Source: `~/.local/state/omarchy/current/theme/` (the same staging as Alacritty).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -46,7 +46,7 @@ impl Look {
         Self::from_table(table.as_ref(), name, stamp)
     }
 
-    /// Changement de thème Omarchy (fichier `theme.name` + `colors.toml` stagés).
+    /// Omarchy theme change (`theme.name` plus staged `colors.toml`).
     pub fn drifted(&self) -> bool {
         let (slug, mtime) = fast_stamp();
         slug != self.stamp.slug || mtime != self.stamp.colors_mtime
@@ -191,7 +191,7 @@ impl Look {
         self.cloth[i as usize % self.cloth.len()]
     }
 
-    /// Rouge du thème (encre 3 / `red` Omarchy).
+    /// Theme red (ink 3 / Omarchy `red`).
     pub fn rust(&self) -> Color32 {
         self.inks.get(2).copied().unwrap_or(self.accent)
     }

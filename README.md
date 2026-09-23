@@ -8,7 +8,7 @@ Local data only — `~/.local/share/omacourses`. No account, no sync.
 
 ![Shelf — notebook spines](docs/screens/etagere.png)
 
-![Lined page — Mindset](docs/screens/feuille.png)
+![Lined sketch — Mindset](docs/screens/feuille.png)
 
 ![Graph paper — Art direction](docs/screens/millimetre.png)
 
@@ -30,9 +30,9 @@ Theme read from `omarchy theme current` / `colors.toml`.
 
 ## Gestures
 
-Two postures, one well in the pencil case (`k` to toggle). Picking up the stylus switches to tablet.
+The lectern follows the stylus: in range, the hand pans and the nib writes. Put it down, the mouse writes again.
 
-| | **Lectern** (keyboard + mouse) | **Tablet** (stylus + hand) |
+| | Mouse | Stylus in range |
 |---|---|---|
 | Writes | mouse | stylus |
 | Pan | space + drag, middle-click, trackpad | finger, two-finger drag |
@@ -48,7 +48,7 @@ Two postures, one well in the pencil case (`k` to toggle). Picking up the stylus
 | `[` `]` `1-9` | thickness, ink |
 | `m` | cycle paper (blank, lined, grid, dotted, graph, slate) |
 | corners / `0` / click on % | fit to screen |
-| shift while releasing a stroke | line / circle / rectangle |
+| hold the pen still ~1s | line / arrow / triangle / square / diamond / ellipse / circle |
 | `ctrl+e` `ctrl+shift+e` | PNG, PDF |
 
 First launch: notebooks *Mindset* and *Art direction*.

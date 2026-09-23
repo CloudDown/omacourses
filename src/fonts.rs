@@ -34,14 +34,14 @@ pub fn install(ctx: &egui::Context) {
             .insert(FontFamily::Name("serif".into()), vec!["serif".into()]);
     }
 
-    // Noto Color Emoji est une bitmap CBDT : egui n'en sort aucun contour,
-    // et la famille « emoji » avalait les glyphes sans rien dessiner.
-    // Les icônes de l'étagère passent par `emoji::Atlas`.
+    // Noto Color Emoji is a CBDT bitmap: egui extracts no outlines from it,
+    // and the "emoji" family swallowed glyphs without drawing anything.
+    // Shelf icons go through `emoji::Atlas`.
 
     ctx.set_fonts(fonts);
 }
 
-/// Fichier de la mono système — le même alias `monospace` que le terminal Omarchy.
+/// System mono file — the same `monospace` alias as the Omarchy terminal.
 pub fn mono_file() -> Option<PathBuf> {
     let out = Command::new("fc-match")
         .args(["monospace", "-f", "%{file}\n"])

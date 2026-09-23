@@ -3,7 +3,7 @@ use egui::{Pos2, Rect, Vec2};
 
 pub const ZOOM_MIN: f32 = 0.05;
 pub const ZOOM_MAX: f32 = 8.0;
-/// Niveaux relatifs à la taille écran (1.0 = la feuille colle à la fenêtre).
+/// Levels relative to the screen size (1.0 = the sheet fills the window).
 pub const ZOOM_STOPS: [f32; 9] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0];
 
 #[derive(Clone, Copy, Debug)]
@@ -68,14 +68,14 @@ impl Camera {
         );
     }
 
-    /// Coin haut-gauche de la page, zoomé pour qu’une tranche `1/span` remplisse l’écran.
-    pub fn show_slice(&mut self, rect: Rect, page: usize, page_w: f32, page_h: f32, span: f32) {
-        let span = span.max(1.0);
-        let z = Self::fit_zoom(rect, page_w / span, page_h / span);
-        self.zoom = z;
-        let origin_y = page as f32 * (page_h + PAGE_GAP);
+    /// Top-left corner: write into it, zoomed out enough to see the whole sheet.
+    pub fn show_writing(&mut self, rect: Rect, page: usize, page_w: f32, page_h: f32) {
         let margin = 8.0;
-        self.pan = Vec2::new(margin, margin - origin_y * z);
+        let z_w = (rect.width() - margin * 2.0) / page_w.max(1.0);
+        let z_fit = Self::fit_zoom(rect, page_w, page_h);
+        self.zoom = z_w.max(z_fit * 1.7).clamp(ZOOM_MIN, ZOOM_MAX);
+        let origin_y = page as f32 * (page_h + PAGE_GAP);
+        self.pan = Vec2::new(margin, margin - origin_y * self.zoom);
     }
 }
 
