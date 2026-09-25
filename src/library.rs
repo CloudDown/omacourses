@@ -16,7 +16,7 @@ pub struct NoteMeta {
     pub cover: u8,
     #[serde(default)]
     pub emoji: String,
-    /// Shelf cell (gaps allowed), 0..SHELF_SLOTS.
+    /// Shelf cell (gaps allowed), 0..SHELF_SLOTS — or 0..TRASH_SLOTS while in the bin.
     #[serde(default)]
     pub slot: u32,
 }
@@ -25,6 +25,8 @@ pub struct NoteMeta {
 pub const SHELF_COLS: u32 = 10;
 pub const SHELF_ROWS: u32 = 3;
 pub const SHELF_SLOTS: u32 = SHELF_COLS * SHELF_ROWS;
+/// One red row under the shelf, same 10 columns.
+pub const TRASH_SLOTS: u32 = SHELF_COLS;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -110,6 +112,7 @@ impl Library {
             .unwrap_or_default();
         let mut lib = Self { root, index };
         lib.ensure_slots();
+        lib.ensure_trash_slots();
         lib
     }
 
@@ -194,6 +197,17 @@ impl Library {
             .unwrap_or(SHELF_SLOTS)
     }
 
+    fn first_free_trash_slot(&self) -> u32 {
+        let used: HashSet<u32> = self.index.trash.iter().map(|m| m.slot).collect();
+        (0..TRASH_SLOTS)
+            .find(|i| !used.contains(i))
+            .unwrap_or(TRASH_SLOTS)
+    }
+
+    pub fn is_trashed(&self, id: Uuid) -> bool {
+        self.index.trash.iter().any(|m| m.id == id)
+    }
+
     fn ensure_slots(&mut self) {
         self.remap_shelf_cols();
         let mut seen = HashSet::new();
@@ -216,6 +230,39 @@ impl Library {
         let mut dirty = clash || all_zero;
         for n in self.index.notes.iter_mut() {
             if n.slot < SHELF_SLOTS {
+                continue;
+            }
+            if let Some(slot) = free.pop() {
+                n.slot = slot;
+                dirty = true;
+            }
+        }
+        if dirty {
+            self.save_index();
+        }
+    }
+
+    fn ensure_trash_slots(&mut self) {
+        let mut seen = HashSet::new();
+        let clash = self.index.trash.iter().any(|n| !seen.insert(n.slot));
+        let mut dirty = false;
+        if clash {
+            for (i, n) in self.index.trash.iter_mut().enumerate() {
+                n.slot = i as u32;
+            }
+            dirty = true;
+        }
+        let used: HashSet<u32> = self
+            .index
+            .trash
+            .iter()
+            .filter(|n| n.slot < TRASH_SLOTS)
+            .map(|n| n.slot)
+            .collect();
+        let mut free: Vec<u32> = (0..TRASH_SLOTS).filter(|i| !used.contains(i)).collect();
+        free.reverse();
+        for n in self.index.trash.iter_mut() {
+            if n.slot < TRASH_SLOTS {
                 continue;
             }
             if let Some(slot) = free.pop() {
@@ -285,6 +332,57 @@ impl Library {
         self.save_index();
     }
 
+    /// Places notebooks on bin cells `dest`, `dest+1`, … (swap if occupied).
+    pub fn place_trash_at(&mut self, moving: &[Uuid], dest: u32) {
+        if moving.is_empty() {
+            return;
+        }
+        let dest = dest.min(TRASH_SLOTS.saturating_sub(1));
+        let old: Vec<u32> = moving
+            .iter()
+            .filter_map(|id| {
+                self.index
+                    .trash
+                    .iter()
+                    .find(|n| n.id == *id)
+                    .map(|n| n.slot)
+            })
+            .collect();
+        for (k, id) in moving.iter().enumerate() {
+            let target = dest.saturating_add(k as u32);
+            if target >= TRASH_SLOTS {
+                continue;
+            }
+            let prev = old.get(k).copied();
+            if let Some(other) = self
+                .index
+                .trash
+                .iter_mut()
+                .find(|n| n.slot == target && !moving.contains(&n.id))
+            {
+                other.slot = prev.unwrap_or(target);
+            }
+            if let Some(n) = self.index.trash.iter_mut().find(|n| n.id == *id) {
+                n.slot = target;
+            }
+        }
+        self.save_index();
+    }
+
+    pub fn restore_at(&mut self, moving: &[Uuid], dest: u32) {
+        for id in moving {
+            self.restore_note(*id);
+        }
+        self.place_at(moving, dest);
+    }
+
+    pub fn trash_at(&mut self, moving: &[Uuid], dest: u32) {
+        for id in moving {
+            self.trash_note(*id);
+        }
+        self.place_trash_at(moving, dest);
+    }
+
     pub fn bring_front(&mut self, id: Uuid) {
         if let Some(i) = self.index.notes.iter().position(|m| m.id == id) {
             if i == 0 {
@@ -303,9 +401,10 @@ impl Library {
     /// Moves the notebook into the trash (files kept).
     pub fn trash_note(&mut self, id: Uuid) {
         if let Some(i) = self.index.notes.iter().position(|m| m.id == id) {
-            let meta = self.index.notes.remove(i);
+            let mut meta = self.index.notes.remove(i);
             self.index.trash.retain(|m| m.id != id);
-            self.index.trash.insert(0, meta);
+            meta.slot = self.first_free_trash_slot();
+            self.index.trash.push(meta);
             self.save_index();
         }
     }

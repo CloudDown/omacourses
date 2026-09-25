@@ -10,7 +10,7 @@ use egui::style::ScrollAnimation;
 use uuid::Uuid;
 
 use crate::camera::{page_at, page_origin, Camera, ZOOM_STOPS};
-use crate::document::{ImageObj, Note, Page, PaperKind, SheetJoin, TextBox, PAGE_H, PAGE_W};
+use crate::document::{ImageObj, Note, PaperKind, SheetJoin, TextBox, PAGE_H, PAGE_W};
 use crate::emoji::Atlas;
 use crate::export::{self, MediaLoader};
 use crate::ink::{
@@ -18,7 +18,7 @@ use crate::ink::{
     InkStroke, Nib, Tool,
 };
 use crate::library::{
-    ensure_png, image_size, DockEdge, Library, SHELF_COLS, SHELF_ROWS, SHELF_SLOTS,
+    ensure_png, image_size, DockEdge, Library, SHELF_COLS, SHELF_ROWS, SHELF_SLOTS, TRASH_SLOTS,
 };
 use crate::look::Look;
 use crate::pressure::Pressure;
@@ -45,6 +45,12 @@ enum DosAct {
     Select,
     Toggle,
     Range,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShelfDrop {
+    Shelf(usize),
+    Bin(usize),
 }
 
 struct Toss {
@@ -99,6 +105,7 @@ struct SpineWheel {
     colors: bool,
     hover: Option<WheelPick>,
     secondary: bool,
+    color_hold_t0: Option<f64>,
 }
 
 #[derive(Clone, Copy)]
@@ -189,7 +196,7 @@ pub struct CahierApp {
     /// Explorer-style selection on the shelf.
     shelf_sel: Vec<Uuid>,
     shelf_anchor: Option<Uuid>,
-    /// Trash view (otherwise the shelf is active).
+    /// Red bin row open at the bottom of the shelf.
     shelf_trash: bool,
     /// Spine faces, for the selection rectangle.
     shelf_slots: Vec<(Uuid, Rect)>,
@@ -204,10 +211,12 @@ pub struct CahierApp {
     shelf_haul_now: Option<Pos2>,
     shelf_haul_ids: Vec<Uuid>,
     shelf_haul_armed: bool,
-    /// Grid cell index while dragging.
-    shelf_drop: Option<usize>,
-    /// Every cell (occupied or empty).
+    /// Grid cell while dragging.
+    shelf_drop: Option<ShelfDrop>,
+    /// Every shelf cell (occupied or empty).
     shelf_grid: Vec<Rect>,
+    /// Bin row cells when the red zone is open.
+    trash_grid: Vec<Rect>,
     shelf_toss: Vec<Toss>,
     trash_rect: Rect,
     trash_mouth: Pos2,
@@ -302,6 +311,7 @@ impl CahierApp {
             shelf_haul_armed: false,
             shelf_drop: None,
             shelf_grid: Vec::new(),
+            trash_grid: Vec::new(),
             shelf_toss: Vec::new(),
             trash_rect: Rect::NOTHING,
             trash_mouth: Pos2::ZERO,
@@ -559,10 +569,11 @@ impl CahierApp {
     }
 
     fn set_sheet_join(&mut self, join: SheetJoin) {
-        let Some(n) = &self.note else {
-            return;
-        };
-        if n.sheet_join == join {
+        if self
+            .note
+            .as_ref()
+            .is_none_or(|n| n.sheet_join == join)
+        {
             return;
         }
         self.finish_live();
@@ -576,30 +587,20 @@ impl CahierApp {
         } else {
             pos2(0.0, 0.0)
         };
-        let page = self.page_at_paper(old_paper);
-        let local = old_paper - self.origin_of(page);
-        let (ow, oh) = (self.pw(), self.ph());
-        let (col, row) = self
-            .page_cells()
-            .get(page)
-            .copied()
-            .unwrap_or((0, 0));
-        let logical = pos2(col as f32 * ow + local.x, row as f32 * oh + local.y);
+        let (cells, old_gap) = self
+            .note
+            .as_ref()
+            .map(|n| (n.unit_cells(), n.sheet_join.gap()))
+            .unwrap_or_else(|| (vec![(0, 0)], 0.0));
+        let idx = page_at(old_paper, &cells, PAGE_W, PAGE_H, old_gap);
+        let (col, row) = cells.get(idx).copied().unwrap_or((0, 0));
+        let local = old_paper - page_origin(col, row, PAGE_W, PAGE_H, old_gap);
         if let Some(n) = &mut self.note {
             n.apply_sheet_join(join);
         }
         if rect.width() > 10.0 {
-            let new_world = match join {
-                SheetJoin::Linked => logical,
-                SheetJoin::Separate => {
-                    let tw = PAGE_W;
-                    let th = PAGE_H;
-                    let c = (logical.x / tw).floor() as i32;
-                    let r = (logical.y / th).floor() as i32;
-                    let o = page_origin(c, r, tw, th, SheetJoin::Separate.gap());
-                    pos2(o.x + logical.x - c as f32 * tw, o.y + logical.y - r as f32 * th)
-                }
-            };
+            let o = page_origin(col, row, PAGE_W, PAGE_H, join.gap());
+            let new_world = pos2(o.x + local.x, o.y + local.y);
             let z = self.camera.zoom;
             self.camera.pan = (focus - rect.min) - vec2(new_world.x * z, new_world.y * z);
         }
@@ -1207,55 +1208,49 @@ impl CahierApp {
             }
         }
 
+        let query = match &self.scene {
+            Scene::Shelf { query } => query.to_lowercase(),
+            _ => String::new(),
+        };
+        let querying = !query.is_empty();
+        let mut open = None;
+        let mut select = None;
+        let mut toggle = None;
+        let mut range = None;
+        self.shelf_slots.clear();
+        self.shelf_grid.clear();
+        self.trash_grid.clear();
+
+        if self.bin_open() {
+            self.ui_bin_zone(ctx, &mut open, &mut select, &mut toggle, &mut range);
+        }
+
         CentralPanel::default()
             .frame(Frame::NONE.fill(self.look.desk))
             .show(ctx, |ui| {
-                let query = match &self.scene {
-                    Scene::Shelf { query } => query.to_lowercase(),
-                    _ => String::new(),
-                };
-                let source: Vec<_> = if self.shelf_trash {
-                    self.lib.index.trash.clone()
-                } else {
-                    self.lib.index.notes.clone()
-                };
-                let notes: Vec<_> = source
-                    .into_iter()
+                let notes: Vec<_> = self
+                    .lib
+                    .index
+                    .notes
+                    .iter()
                     .filter(|m| query.is_empty() || m.title.to_lowercase().contains(&query))
                     .filter(|m| !self.shelf_toss.iter().any(|t| t.id == m.id))
+                    .cloned()
                     .collect();
 
                 ui.add_space(92.0);
 
-                if self.shelf_trash && notes.is_empty() {
-                    self.shelf_slots.clear();
-                    self.shelf_grid.clear();
-                } else {
-                    let mut open = None;
-                    let mut select = None;
-                    let mut toggle = None;
-                    let mut range = None;
-                    let ids: Vec<Uuid> = {
-                        let mut v = notes.clone();
-                        if !self.shelf_trash && query.is_empty() {
-                            v.sort_by_key(|n| n.slot);
-                        }
-                        v.into_iter().map(|n| n.id).collect()
-                    };
-                    self.shelf_slots.clear();
-                    self.shelf_grid.clear();
-                    let querying = !query.is_empty();
-                    let shifting = self.shelf_haul_armed && !self.shelf_trash && !querying;
-                    let packed = self.shelf_trash || querying;
+                let shifting = self.shelf_haul_armed && !querying;
+                let packed = querying;
 
-                    ScrollArea::vertical()
-                        .id_salt("shelf-grid")
-                        .scroll_source(ScrollSource {
-                            drag: false,
-                            scroll_bar: true,
-                            mouse_wheel: true,
-                        })
-                        .show(ui, |ui| {
+                ScrollArea::vertical()
+                    .id_salt("shelf-grid")
+                    .scroll_source(ScrollSource {
+                        drag: false,
+                        scroll_bar: true,
+                        mouse_wheel: true,
+                    })
+                    .show(ui, |ui| {
                         if let Some(mt) = ui.input(|i| i.multi_touch()) {
                             if mt.num_touches >= 2 && mt.translation_delta != Vec2::ZERO {
                                 ui.scroll_with_delta_animation(
@@ -1271,7 +1266,8 @@ impl CahierApp {
                         let pitch = vec2(slot.x + SHELF_GAP, slot.y + SHELF_GAP);
                         let (cols, rows) = if packed {
                             let available = ui.available_width() - left;
-                            let cols = ((available + SHELF_GAP) / pitch.x).floor().max(1.0) as usize;
+                            let cols =
+                                ((available + SHELF_GAP) / pitch.x).floor().max(1.0) as usize;
                             let rows = (notes.len().max(1) + cols - 1) / cols;
                             (cols, rows.max(1))
                         } else {
@@ -1307,11 +1303,11 @@ impl CahierApp {
                                 .as_ref()
                                 .map(|m| shifting && self.shelf_haul_ids.contains(&m.id))
                                 .unwrap_or(false);
-                            let hot = shifting && self.shelf_drop == Some(idx);
+                            let hot = shifting && self.shelf_drop == Some(ShelfDrop::Shelf(idx));
                             if let Some(meta) = meta.filter(|_| !lifted) {
                                 ui.scope_builder(UiBuilder::new().max_rect(cell), |ui| {
                                     let selected = self.shelf_sel.contains(&meta.id);
-                                    match self.cahier_dos(ui, &meta, selected) {
+                                    match self.cahier_dos(ui, &meta, selected, false) {
                                         Some(DosAct::Open) => open = Some(meta.id),
                                         Some(DosAct::Select) => select = Some(meta.id),
                                         Some(DosAct::Toggle) => toggle = Some(meta.id),
@@ -1324,47 +1320,56 @@ impl CahierApp {
                             }
                         }
                     });
-
-                    if !self.shelf_band_armed {
-                        if let Some(id) = select {
-                            self.shelf_sel = vec![id];
-                            self.shelf_anchor = Some(id);
-                        }
-                        if let Some(id) = toggle {
-                            if let Some(p) = self.shelf_sel.iter().position(|x| *x == id) {
-                                self.shelf_sel.remove(p);
-                            } else {
-                                self.shelf_sel.push(id);
-                            }
-                            self.shelf_anchor = Some(id);
-                        }
-                        if let Some(id) = range {
-                            let anchor =
-                                self.shelf_anchor.or_else(|| self.shelf_sel.last().copied());
-                            if let Some(a) = anchor {
-                                if let (Some(ia), Some(ib)) = (
-                                    ids.iter().position(|x| *x == a),
-                                    ids.iter().position(|x| *x == id),
-                                ) {
-                                    let (lo, hi) = if ia <= ib { (ia, ib) } else { (ib, ia) };
-                                    self.shelf_sel = ids[lo..=hi].to_vec();
-                                }
-                            } else {
-                                self.shelf_sel = vec![id];
-                                self.shelf_anchor = Some(id);
-                            }
-                        }
-                    }
-                    if let Some(id) = open {
-                        if !self.shelf_trash && !self.shelf_band_armed {
-                            self.emoji_pick = None;
-                            self.rename_id = None;
-                            self.shelf_sel.clear();
-                            self.open_note(id);
-                        }
-                    }
-                }
             });
+
+        let ids: Vec<Uuid> = {
+            let mut v = self.lib.index.notes.clone();
+            v.sort_by_key(|n| n.slot);
+            let mut ids: Vec<_> = v.into_iter().map(|n| n.id).collect();
+            if self.shelf_trash {
+                let mut t = self.lib.index.trash.clone();
+                t.sort_by_key(|n| n.slot);
+                ids.extend(t.into_iter().map(|n| n.id));
+            }
+            ids
+        };
+        if !self.shelf_band_armed {
+            if let Some(id) = select {
+                self.shelf_sel = vec![id];
+                self.shelf_anchor = Some(id);
+            }
+            if let Some(id) = toggle {
+                if let Some(p) = self.shelf_sel.iter().position(|x| *x == id) {
+                    self.shelf_sel.remove(p);
+                } else {
+                    self.shelf_sel.push(id);
+                }
+                self.shelf_anchor = Some(id);
+            }
+            if let Some(id) = range {
+                let anchor = self.shelf_anchor.or_else(|| self.shelf_sel.last().copied());
+                if let Some(a) = anchor {
+                    if let (Some(ia), Some(ib)) = (
+                        ids.iter().position(|x| *x == a),
+                        ids.iter().position(|x| *x == id),
+                    ) {
+                        let (lo, hi) = if ia <= ib { (ia, ib) } else { (ib, ia) };
+                        self.shelf_sel = ids[lo..=hi].to_vec();
+                    }
+                } else {
+                    self.shelf_sel = vec![id];
+                    self.shelf_anchor = Some(id);
+                }
+            }
+        }
+        if let Some(id) = open {
+            if !self.lib.is_trashed(id) && !self.shelf_band_armed {
+                self.emoji_pick = None;
+                self.rename_id = None;
+                self.shelf_sel.clear();
+                self.open_note(id);
+            }
+        }
 
         if let (Some(a), Some(b)) = (self.shelf_band, self.shelf_band_now) {
             if self.shelf_band_armed {
@@ -1388,26 +1393,10 @@ impl CahierApp {
             .anchor(Align2::RIGHT_BOTTOM, vec2(-18.0, -16.0))
             .order(Order::Foreground)
             .show(ctx, |ui| {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing = vec2(10.0, 0.0);
-                    ui.set_height(62.0);
+                ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
+                ui.with_layout(Layout::top_down(Align::Center), |ui| {
                     let n = self.lib.index.trash.len() + self.shelf_toss.len();
-                    let hungry = self.shelf_haul_armed
-                        && self
-                            .shelf_haul_now
-                            .is_some_and(|p| self.trash_rect.expand(18.0).contains(p));
-                    let resp = self
-                        .wastebasket(ui, self.shelf_trash, n, hungry)
-                        .on_hover_text(if self.shelf_trash { "Shelf" } else { "Trash" });
-                    if resp.clicked() && !self.shelf_fed && !self.shelf_haul_armed {
-                        self.shelf_trash = !self.shelf_trash;
-                        self.shelf_sel.clear();
-                        self.shelf_anchor = None;
-                        if let Scene::Shelf { query } = &mut self.scene {
-                            query.clear();
-                        }
-                    }
-                    if self.shelf_trash && !self.lib.index.trash.is_empty() {
+                    if self.shelf_trash && n > 0 {
                         if self
                             .empty_bin_pull(ui)
                             .on_hover_text("Empty the bin")
@@ -1416,6 +1405,21 @@ impl CahierApp {
                             self.lib.empty_trash();
                             self.shelf_sel.clear();
                             self.shelf_fed = true;
+                        }
+                    }
+                    let hungry = self.shelf_haul_armed
+                        && self
+                            .shelf_haul_now
+                            .is_some_and(|p| self.trash_rect.expand(18.0).contains(p));
+                    let resp = self
+                        .wastebasket(ui, self.bin_open(), n, hungry)
+                        .on_hover_text("Trash");
+                    if resp.clicked() && !self.shelf_fed && !self.shelf_haul_armed {
+                        self.shelf_trash = !self.shelf_trash;
+                        self.shelf_sel.clear();
+                        self.shelf_anchor = None;
+                        if let Scene::Shelf { query } = &mut self.scene {
+                            query.clear();
                         }
                     }
                 });
@@ -1459,9 +1463,7 @@ impl CahierApp {
                         self.lib.index.fiche_pliee = !self.lib.index.fiche_pliee;
                         self.lib.save_index();
                     }
-                    if !self.shelf_trash
-                        && self.inkwell(ui).on_hover_text("New  ·  N").clicked()
-                    {
+                    if self.inkwell(ui).on_hover_text("New  ·  N").clicked() {
                         self.new_note();
                     }
                     if self
@@ -1540,27 +1542,20 @@ impl CahierApp {
             }
         }
         if select_all {
-            let src = if self.shelf_trash {
-                &self.lib.index.trash
-            } else {
-                &self.lib.index.notes
-            };
-            self.shelf_sel = src.iter().map(|m| m.id).collect();
+            self.shelf_sel = self.lib.index.notes.iter().map(|m| m.id).collect();
         }
         let ids = self.shelf_action_ids(ctx);
         if trash_sel && !ids.is_empty() {
-            if self.shelf_trash {
-                for id in &ids {
+            for id in &ids {
+                if self.lib.is_trashed(*id) {
                     self.lib.purge_trashed(*id);
-                }
-            } else {
-                for id in &ids {
+                } else {
                     self.lib.trash_note(*id);
                 }
             }
             self.shelf_sel.retain(|id| !ids.contains(id));
         }
-        if pin && !self.shelf_trash && !ids.is_empty() {
+        if pin && !ids.is_empty() {
             let pin_on = ids.iter().any(|id| {
                 self.lib
                     .index
@@ -1570,6 +1565,9 @@ impl CahierApp {
                     .is_some_and(|m| !m.pinned)
             });
             for id in &ids {
+                if self.lib.is_trashed(*id) {
+                    continue;
+                }
                 if let Some(mut note) = self.lib.load_note(*id) {
                     note.pinned = pin_on;
                     self.lib.save_note(&note);
@@ -1579,22 +1577,28 @@ impl CahierApp {
                 }
             }
         }
-        if mark && !self.shelf_trash {
+        if mark {
             if let Some(id) = ids.first().copied() {
-                self.emoji_pick = Some(id);
-                self.rename_id = None;
+                if !self.lib.is_trashed(id) {
+                    self.emoji_pick = Some(id);
+                    self.rename_id = None;
+                }
             }
         }
-        if restore && self.shelf_trash {
+        if restore {
             for id in &ids {
-                self.lib.restore_note(*id);
+                if self.lib.is_trashed(*id) {
+                    self.lib.restore_note(*id);
+                }
             }
             self.shelf_sel.retain(|id| !ids.contains(id));
         }
-        if open_one && !self.shelf_trash {
+        if open_one {
             if let Some(id) = self.shelf_sel.first().copied() {
-                self.shelf_sel.clear();
-                self.open_note(id);
+                if !self.lib.is_trashed(id) {
+                    self.shelf_sel.clear();
+                    self.open_note(id);
+                }
             }
         }
     }
@@ -1675,26 +1679,33 @@ impl CahierApp {
             return;
         }
 
-        if sec_pressed && !typing && !on_trash && !self.shelf_trash {
+        if sec_pressed && !typing && !on_trash && !self.shelf_fed {
             if let Some(id) = hit {
-                self.open_spine_wheel(id, pos, ctx);
-                return;
+                if !self.lib.is_trashed(id) {
+                    self.open_spine_wheel(id, pos, ctx, true);
+                    return;
+                }
             }
         }
 
-        if pressed && !typing && !on_trash {
+        if pressed && !typing && !on_trash && !self.shelf_fed {
             if let Some(id) = hit {
-                if !add && !self.shelf_trash {
+                if !add {
                     self.shelf_haul = Some(pos);
                     self.shelf_haul_now = Some(pos);
                     self.shelf_haul_armed = false;
                     self.shelf_drop = None;
                     // Hold is for a finger; the mouse opens the wheel with right-click.
-                    if touching {
+                    if touching && !self.lib.is_trashed(id) {
                         self.shelf_hold_t0 = Some(now);
                     }
+                    let from_bin = self.lib.is_trashed(id);
                     self.shelf_haul_ids = if self.shelf_sel.contains(&id) {
-                        self.shelf_sel.clone()
+                        self.shelf_sel
+                            .iter()
+                            .copied()
+                            .filter(|x| self.lib.is_trashed(*x) == from_bin)
+                            .collect()
                     } else {
                         vec![id]
                     };
@@ -1725,8 +1736,8 @@ impl CahierApp {
                             self.shelf_anchor = Some(id);
                         }
                     }
-                    if !self.shelf_trash && !querying {
-                        self.shelf_drop = self.haul_insert_index(pos);
+                    if !querying {
+                        self.shelf_drop = self.haul_drop(pos);
                     }
                     ctx.set_cursor_icon(if on_trash {
                         CursorIcon::Move
@@ -1734,11 +1745,11 @@ impl CahierApp {
                         CursorIcon::Grabbing
                     });
                     ctx.request_repaint();
-                } else if !self.shelf_trash && touching {
+                } else if touching {
                     if let Some(t0) = self.shelf_hold_t0 {
-                        if now - t0 >= 0.18 {
+                        if now - t0 >= WHEEL_HOLD {
                             if let Some(id) = self.shelf_haul_ids.first().copied() {
-                                self.open_spine_wheel(id, pos, ctx);
+                                self.open_spine_wheel(id, origin, ctx, false);
                             }
                         }
                     }
@@ -1778,22 +1789,40 @@ impl CahierApp {
                 let over = self
                     .shelf_haul_now
                     .is_some_and(|p| self.trash_rect.expand(22.0).contains(p));
-                if over && !self.shelf_trash {
+                let from_bin = self.haul_from_bin();
+                if over && !from_bin {
                     self.begin_toss(ctx.input(|i| i.time));
                     self.shelf_fed = true;
-                } else if !self.shelf_trash && !querying {
-                    if let Some(cell) = self.shelf_drop {
+                } else if !querying {
+                    if let Some(drop) = self.shelf_drop {
                         let mut ids = self.shelf_haul_ids.clone();
                         ids.sort_by_key(|id| {
                             self.lib
                                 .index
                                 .notes
                                 .iter()
+                                .chain(self.lib.index.trash.iter())
                                 .find(|n| n.id == *id)
                                 .map(|n| n.slot)
                                 .unwrap_or(u32::MAX)
                         });
-                        self.lib.place_at(&ids, cell as u32);
+                        match drop {
+                            ShelfDrop::Shelf(cell) => {
+                                if from_bin {
+                                    self.lib.restore_at(&ids, cell as u32);
+                                } else {
+                                    self.lib.place_at(&ids, cell as u32);
+                                }
+                            }
+                            ShelfDrop::Bin(cell) => {
+                                if from_bin {
+                                    self.lib.place_trash_at(&ids, cell as u32);
+                                } else if self.shelf_trash {
+                                    // Into bin cells only while the bin row is open.
+                                    self.lib.trash_at(&ids, cell as u32);
+                                }
+                            }
+                        }
                         self.shelf_fed = true;
                     }
                 }
@@ -1822,23 +1851,46 @@ impl CahierApp {
         }
     }
 
-    fn haul_insert_index(&self, pos: Pos2) -> Option<usize> {
-        if self.shelf_grid.is_empty() {
-            return None;
+    fn haul_drop(&self, pos: Pos2) -> Option<ShelfDrop> {
+        // Bin cells are drop targets only while the bin row is deliberately open.
+        // With the bin closed, shelf → trash goes through the wastebasket logo.
+        let bin_ok = self.shelf_trash;
+        if bin_ok {
+            if let Some(i) = self.trash_grid.iter().position(|r| r.contains(pos)) {
+                return Some(ShelfDrop::Bin(i));
+            }
         }
         if let Some(i) = self.shelf_grid.iter().position(|r| r.contains(pos)) {
-            return Some(i);
+            return Some(ShelfDrop::Shelf(i));
         }
-        self.shelf_grid
-            .iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| {
+        let bin_near = if bin_ok {
+            self.trash_grid.iter().enumerate().min_by(|(_, a), (_, b)| {
                 a.center()
                     .distance_sq(pos)
                     .partial_cmp(&b.center().distance_sq(pos))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
-            .map(|(i, _)| i)
+        } else {
+            None
+        };
+        let shelf_near = self.shelf_grid.iter().enumerate().min_by(|(_, a), (_, b)| {
+            a.center()
+                .distance_sq(pos)
+                .partial_cmp(&b.center().distance_sq(pos))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        match (bin_near, shelf_near) {
+            (Some((i, br)), Some((_, sr))) => {
+                if br.center().distance_sq(pos) <= sr.center().distance_sq(pos) {
+                    Some(ShelfDrop::Bin(i))
+                } else {
+                    shelf_near.map(|(i, _)| ShelfDrop::Shelf(i))
+                }
+            }
+            (Some((i, _)), None) => Some(ShelfDrop::Bin(i)),
+            (None, Some((i, _))) => Some(ShelfDrop::Shelf(i)),
+            (None, None) => None,
+        }
     }
 
     fn begin_toss(&mut self, now: f64) {
@@ -2070,7 +2122,14 @@ impl CahierApp {
         if self.shelf_haul_armed {
             if let Some(pos) = self.shelf_haul_now {
                 for (i, id) in self.shelf_haul_ids.iter().enumerate() {
-                    if let Some(m) = self.lib.index.notes.iter().find(|n| n.id == *id) {
+                    let meta = self
+                        .lib
+                        .index
+                        .notes
+                        .iter()
+                        .chain(self.lib.index.trash.iter())
+                        .find(|n| n.id == *id);
+                    if let Some(m) = meta {
                         ghosts.push((
                             pos + vec2(i as f32 * 11.0, i as f32 * 8.0),
                             0.88,
@@ -2116,13 +2175,13 @@ impl CahierApp {
             });
     }
 
-    /// Same pill as the search field.
+    /// Sits on the wastebasket while the bin row is open.
     fn empty_bin_pull(&self, ui: &mut Ui) -> Response {
-        let (rect, resp) = ui.allocate_exact_size(vec2(84.0, 36.0), Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(vec2(96.0, 40.0), Sense::click());
         let fill = if resp.hovered() {
-            self.look.desk_edge
+            shade_rgb(self.look.rust(), 1.12)
         } else {
-            self.look.desk_deep
+            self.look.rust()
         };
         ui.painter()
             .rect_filled(rect, CornerRadius::same(18), fill);
@@ -2130,8 +2189,8 @@ impl CahierApp {
             rect.center(),
             Align2::CENTER_CENTER,
             "Empty",
-            self.look.mono(13.0),
-            self.look.rust(),
+            self.look.mono(15.0),
+            well_glyph(fill, self.look.paper, self.look.ink),
         );
         resp.on_hover_cursor(CursorIcon::PointingHand)
     }
@@ -2280,6 +2339,7 @@ impl CahierApp {
             ("Trash", "Del"),
             ("Restore", "R"),
             ("Pan", "space"),
+            ("Tear page", "corner"),
             ("Undo", "Ctrl+Z"),
             ("Save", "Ctrl+S"),
             ("Zoom", "+ −"),
@@ -2294,6 +2354,7 @@ impl CahierApp {
             ("Eraser", "stylus button"),
             ("Lasso", "2nd button"),
             ("Shape", "hold still"),
+            ("Tear page", "fold"),
         ];
         self.paint_help_col(&p, left, "keyboard · mouse", keys, ink, mute);
         self.paint_help_col(&p, right, "hands", hands, ink, mute);
@@ -2526,11 +2587,89 @@ impl CahierApp {
         false
     }
 
+    fn haul_from_bin(&self) -> bool {
+        self.shelf_haul_ids
+            .first()
+            .copied()
+            .is_some_and(|id| self.lib.is_trashed(id))
+    }
+
+    fn bin_open(&self) -> bool {
+        self.shelf_trash
+    }
+
     fn shelf_slot() -> Vec2 {
         vec2(
             DOS_W + DOS_PAD * 2.0,
             DOS_PAD + PAPER_PEEK + DOS_H + TITLE_ROW,
         )
+    }
+
+    fn ui_bin_zone(
+        &mut self,
+        ctx: &Context,
+        open: &mut Option<Uuid>,
+        select: &mut Option<Uuid>,
+        toggle: &mut Option<Uuid>,
+        range: &mut Option<Uuid>,
+    ) {
+        let slot = Self::shelf_slot();
+        let h = slot.y + 20.0;
+        let rust = self.look.rust();
+        let fill = mix_col(
+            self.look.desk,
+            rust,
+            if self.look.dark { 0.34 } else { 0.22 },
+        );
+        TopBottomPanel::bottom("bin-zone")
+            .exact_height(h)
+            .show_separator_line(false)
+            .frame(Frame::NONE.fill(fill))
+            .show(ctx, |ui| {
+                let shifting = self.shelf_haul_armed;
+                let left = 28.0;
+                let pitch = vec2(slot.x + SHELF_GAP, slot.y + SHELF_GAP);
+                let cols = TRASH_SLOTS as usize;
+                let grid = vec2(left + cols as f32 * pitch.x, slot.y);
+                ui.add_space(8.0);
+                let (full, _) = ui.allocate_exact_size(grid, Sense::hover());
+                let origin = pos2(full.min.x + left, full.min.y);
+                let occ: HashMap<u32, crate::library::NoteMeta> = self
+                    .lib
+                    .index
+                    .trash
+                    .iter()
+                    .filter(|m| !self.shelf_toss.iter().any(|t| t.id == m.id))
+                    .map(|m| (m.slot, m.clone()))
+                    .collect();
+                for idx in 0..cols {
+                    let cell = Rect::from_min_size(
+                        origin + vec2(idx as f32 * pitch.x, 0.0),
+                        slot,
+                    );
+                    self.trash_grid.push(cell);
+                    let meta = occ.get(&(idx as u32)).cloned();
+                    let lifted = meta
+                        .as_ref()
+                        .map(|m| shifting && self.shelf_haul_ids.contains(&m.id))
+                        .unwrap_or(false);
+                    let hot = shifting && self.shelf_drop == Some(ShelfDrop::Bin(idx));
+                    if let Some(meta) = meta.filter(|_| !lifted) {
+                        ui.scope_builder(UiBuilder::new().max_rect(cell), |ui| {
+                            let selected = self.shelf_sel.contains(&meta.id);
+                            match self.cahier_dos(ui, &meta, selected, true) {
+                                Some(DosAct::Open) => *open = Some(meta.id),
+                                Some(DosAct::Select) => *select = Some(meta.id),
+                                Some(DosAct::Toggle) => *toggle = Some(meta.id),
+                                Some(DosAct::Range) => *range = Some(meta.id),
+                                None => {}
+                            }
+                        });
+                    } else if shifting {
+                        self.place_dos(ui, cell, hot);
+                    }
+                }
+            });
     }
 
     fn paint_sel_wash(&self, p: &Painter, rect: Rect, strong: bool) {
@@ -2582,6 +2721,7 @@ impl CahierApp {
         ui: &mut Ui,
         meta: &crate::library::NoteMeta,
         selected: bool,
+        in_bin: bool,
     ) -> Option<DosAct> {
         let slot = vec2(
             DOS_W + DOS_PAD * 2.0,
@@ -2589,7 +2729,7 @@ impl CahierApp {
         );
         let (slot_rect, resp) = ui.allocate_exact_size(slot, Sense::click());
         let id = Id::new("cahier-dos").with(meta.id);
-        let renaming = self.rename_id == Some(meta.id) && !self.shelf_trash;
+        let renaming = self.rename_id == Some(meta.id) && !in_bin;
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let over = !renaming && pointer.is_some_and(|p| slot_rect.contains(p));
         if over {
@@ -2597,10 +2737,9 @@ impl CahierApp {
         }
         let lift_t = ui.ctx().animate_bool_with_time(id.with("peek"), over, 0.16);
         let lift = lift_t * lift_t * (3.0 - 2.0 * lift_t);
-        let discarded = self.shelf_trash;
-        let e = if discarded { lift * 0.2 } else { lift };
-        let cloth = if discarded {
-            mix_col(self.look.cloth_at(meta.cover), self.look.desk, 0.22)
+        let e = if in_bin { lift * 0.2 } else { lift };
+        let cloth = if in_bin {
+            mix_col(self.look.cloth_at(meta.cover), self.look.rust(), 0.16)
         } else {
             self.look.cloth_at(meta.cover)
         };
@@ -2776,7 +2915,7 @@ impl CahierApp {
                 self.look.serif(21.0),
                 self.look.fg,
             );
-            if !self.shelf_trash {
+            if !in_bin {
                 let title_resp = ui.interact(title_rect, id.with("title"), Sense::click());
                 if title_resp.clicked() {
                     self.rename_buf = meta.title.clone();
@@ -2795,7 +2934,7 @@ impl CahierApp {
         {
             let on_title = pointer.is_some_and(|p| title_rect.contains(p));
             let mods = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
-            if resp.double_clicked() && !on_title && !self.shelf_trash {
+            if resp.double_clicked() && !on_title && !in_bin {
                 act = Some(DosAct::Open);
             } else if resp.clicked()
                 && !on_title
@@ -2818,21 +2957,16 @@ impl CahierApp {
         act
     }
 
-    fn open_spine_wheel(&mut self, id: Uuid, pos: Pos2, ctx: &Context) {
-        let screen = ctx.screen_rect();
+    fn open_spine_wheel(&mut self, id: Uuid, pos: Pos2, ctx: &Context, secondary: bool) {
         let now = ctx.input(|i| i.time);
-        let secondary = ctx.input(|i| i.pointer.button_down(PointerButton::Secondary));
-        let mut origin = pos + vec2(0.0, -WHEEL_LIFT);
-        let m = WHEEL_OUT + 16.0;
-        origin.x = origin.x.clamp(screen.min.x + m, screen.max.x - m);
-        origin.y = origin.y.clamp(screen.min.y + m, screen.max.y - m);
         self.spine_wheel = Some(SpineWheel {
             id,
-            origin,
+            origin: pos,
             t0: now,
             colors: false,
             hover: None,
             secondary,
+            color_hold_t0: None,
         });
         self.shelf_haul = None;
         self.shelf_haul_now = None;
@@ -2849,33 +2983,92 @@ impl CahierApp {
         };
         let n_cloth = self.look.cloth.len().max(1);
         let secondary = wheel.secondary;
-        let (pos, down, released) = ctx.input(|i| {
-            if secondary {
-                (
-                    i.pointer.interact_pos().or(i.pointer.hover_pos()),
-                    i.pointer.button_down(PointerButton::Secondary),
-                    i.pointer.button_released(PointerButton::Secondary),
-                )
-            } else {
-                (
-                    i.pointer.interact_pos().or(i.pointer.hover_pos()),
-                    i.pointer.primary_down(),
-                    i.pointer.primary_released(),
-                )
-            }
+        let (pos, down, released, primary_pressed, now) = ctx.input(|i| {
+            (
+                i.pointer.interact_pos().or(i.pointer.hover_pos()),
+                if secondary {
+                    i.pointer.button_down(PointerButton::Secondary)
+                } else {
+                    i.pointer.primary_down()
+                },
+                if secondary {
+                    i.pointer.button_released(PointerButton::Secondary)
+                } else {
+                    i.pointer.primary_released()
+                },
+                i.pointer.primary_pressed(),
+                i.time,
+            )
         });
         if let Some(pos) = pos {
-            let (colors, hover) = wheel_hit(wheel.origin, pos, wheel.colors, n_cloth);
-            wheel.colors = colors;
-            wheel.hover = hover;
+            wheel.hover = wheel_hit(wheel.origin, pos, wheel.colors, n_cloth);
+            // Finger: linger on Color to open the cloth ring.
+            // Mouse: left-click Color instead (handled below).
+            if !secondary && !wheel.colors {
+                if wheel.hover == Some(WheelPick::Color) {
+                    let t0 = *wheel.color_hold_t0.get_or_insert(now);
+                    if now - t0 >= COLOR_HOLD {
+                        wheel.colors = true;
+                        wheel.color_hold_t0 = None;
+                        wheel.hover = wheel_hit(wheel.origin, pos, true, n_cloth);
+                    }
+                } else {
+                    wheel.color_hold_t0 = None;
+                }
+            }
         }
+
+        if secondary {
+            // Mouse: right-click opened the wheel; left-click activates.
+            if primary_pressed {
+                let id = wheel.id;
+                let pick = wheel.hover;
+                let origin = wheel.origin;
+                let colors = wheel.colors;
+                match pick {
+                    Some(WheelPick::Color) if !colors => {
+                        wheel.colors = true;
+                        wheel.color_hold_t0 = None;
+                        if let Some(pos) = pos {
+                            wheel.hover = wheel_hit(wheel.origin, pos, true, n_cloth);
+                        }
+                        self.shelf_fed = true;
+                    }
+                    Some(_) => {
+                        self.spine_wheel = None;
+                        self.shelf_fed = true;
+                        self.apply_spine_wheel(id, pick, origin, now);
+                    }
+                    None => {
+                        // On the cloth ring, center click steps back to actions.
+                        let at_center =
+                            pos.is_some_and(|p| (p - origin).length() < WHEEL_IN);
+                        if colors && at_center {
+                            wheel.colors = false;
+                            wheel.color_hold_t0 = None;
+                            if let Some(pos) = pos {
+                                wheel.hover = wheel_hit(origin, pos, false, n_cloth);
+                            }
+                            self.shelf_fed = true;
+                        } else {
+                            self.spine_wheel = None;
+                            self.shelf_fed = true;
+                        }
+                    }
+                }
+            }
+            ctx.request_repaint();
+            return;
+        }
+
+        // Finger: commit on release.
         if released || !down {
             let id = wheel.id;
             let pick = wheel.hover;
             let origin = wheel.origin;
             self.spine_wheel = None;
             self.shelf_fed = true;
-            self.apply_spine_wheel(id, pick, origin, ctx.input(|i| i.time));
+            self.apply_spine_wheel(id, pick, origin, now);
         }
         ctx.request_repaint();
     }
@@ -4073,6 +4266,7 @@ impl CahierApp {
         self.handle_tool(ui, &resp, rect);
         self.paint_world(&painter, rect);
         self.paint_sheet_tabs(ui, &painter, rect);
+        self.paint_page_folds(ui, &painter, rect);
         self.paint_overlays(ui, rect);
         self.cursor_for_tool(ui, &resp);
     }
@@ -4154,9 +4348,9 @@ impl CahierApp {
             ui.input(|i| i.any_touches())
         };
         let on_tab = self.tab_held
-            || ui
-                .input(|i| i.pointer.press_origin())
-                .is_some_and(|p| self.sheet_tab_at(p, rect).is_some());
+            || ui.input(|i| i.pointer.press_origin()).is_some_and(|p| {
+                self.sheet_tab_at(p, rect).is_some() || self.fold_at(p, rect).is_some()
+            });
         if finger_pan
             && !on_tab
             && mt.is_none()
@@ -4193,7 +4387,9 @@ impl CahierApp {
         let screen_touch = ui.input(|i| i.any_touches());
         let on_tab = ui
             .input(|i| i.pointer.interact_pos().or(i.pointer.hover_pos()))
-            .is_some_and(|p| self.sheet_tab_at(p, rect).is_some());
+            .is_some_and(|p| {
+                self.sheet_tab_at(p, rect).is_some() || self.fold_at(p, rect).is_some()
+            });
         if !pen_ink && self.live.is_none() && !on_tab {
             if self.is_tablette() {
                 if self.palm_guard(&pen) || self.finger_alive(ui) {
@@ -4266,16 +4462,13 @@ impl CahierApp {
             return;
         }
         if primary_pressed {
-            if let Some(edge) = self.sheet_tab_at(screen, rect) {
-                match self
-                    .note
-                    .as_ref()
-                    .map(|n| n.sheet_join)
-                    .unwrap_or(SheetJoin::Linked)
-                {
-                    SheetJoin::Linked => self.grow_sheet(edge),
-                    SheetJoin::Separate => self.insert_sheet(edge),
-                }
+            if let Some((col, row)) = self.fold_at(screen, rect) {
+                self.tear_sheet_at(col, row);
+                self.tab_held = true;
+                return;
+            }
+            if let Some((col, row)) = self.sheet_tab_at(screen, rect) {
+                self.add_sheet_from_tab(col, row);
                 self.tab_held = true;
                 return;
             }
@@ -4765,8 +4958,35 @@ impl CahierApp {
             let min = map(Pos2::new(origin.x, origin.y));
             let max = map(Pos2::new(origin.x + note.page_w, origin.y + note.page_h));
             let paper = Rect::from_min_max(min, max);
-            let sheet_r = CornerRadius::same(5);
-            painter.rect_filled(paper.translate(vec2(3.0, 4.0)), sheet_r, self.look.shadow);
+            let fused = note.sheet_join == SheetJoin::Linked && note.pages.len() > 1;
+            let n_left = fused && note.unit_occupied(page.col - 1, page.row);
+            let n_right = fused && note.unit_occupied(page.col + 1, page.row);
+            let n_top = fused && note.unit_occupied(page.col, page.row - 1);
+            let n_bot = fused && note.unit_occupied(page.col, page.row + 1);
+            let rad = 5;
+            let sheet_r = if fused {
+                CornerRadius {
+                    nw: if n_left || n_top { 0 } else { rad },
+                    ne: if n_right || n_top { 0 } else { rad },
+                    sw: if n_left || n_bot { 0 } else { rad },
+                    se: if n_right || n_bot { 0 } else { rad },
+                }
+            } else {
+                CornerRadius::same(rad)
+            };
+            let shadow = if fused {
+                let mut sh = paper;
+                if !n_right {
+                    sh.max.x += 3.0;
+                }
+                if !n_bot {
+                    sh.max.y += 4.0;
+                }
+                sh
+            } else {
+                paper.translate(vec2(3.0, 4.0))
+            };
+            painter.rect_filled(shadow, sheet_r, self.look.shadow);
             let fill = if note.paper == PaperKind::Slate {
                 self.look.desk_deep
             } else {
@@ -4774,17 +4994,15 @@ impl CahierApp {
             };
             painter.rect_filled(paper, sheet_r, fill);
             self.paint_template(painter, paper, note.paper, cam.zoom);
-            if note.paper == PaperKind::Lined {
+            if note.paper == PaperKind::Lined && !n_left {
                 self.paint_punches(painter, paper, cam.zoom);
             }
-            if note.paper != PaperKind::Slate {
-                let fold_c = self.look.paper_rule_strong;
-                let fold = [
-                    pos2(paper.max.x, paper.min.y),
-                    pos2(paper.max.x - 16.0 * cam.zoom, paper.min.y),
-                    pos2(paper.max.x, paper.min.y + 16.0 * cam.zoom),
-                ];
-                painter.add(Shape::convex_polygon(fold.to_vec(), fold_c, Stroke::NONE));
+            if note.paper != PaperKind::Slate
+                && !n_right
+                && !n_top
+                && !note.can_tear_unit()
+            {
+                paint_page_fold(painter, paper, cam.zoom, self.look.paper_rule_strong);
             }
 
             for im in &page.images {
@@ -4881,164 +5099,81 @@ impl CahierApp {
         }
     }
 
-    fn sheet_tabs(&self, canvas: Rect) -> [(SheetEdge, Rect); 4] {
-        let page = self.page_in_view(canvas);
-        let Some(paper) = self.page_screen_rect(canvas, page) else {
-            return [
-                (SheetEdge::Left, Rect::NOTHING),
-                (SheetEdge::Right, Rect::NOTHING),
-                (SheetEdge::Top, Rect::NOTHING),
-                (SheetEdge::Bottom, Rect::NOTHING),
-            ];
-        };
-        if paper.width() < 8.0 || paper.height() < 8.0 {
-            return [
-                (SheetEdge::Left, Rect::NOTHING),
-                (SheetEdge::Right, Rect::NOTHING),
-                (SheetEdge::Top, Rect::NOTHING),
-                (SheetEdge::Bottom, Rect::NOTHING),
-            ];
-        }
-        let mut tabs = [
-            (SheetEdge::Left, outward_band(paper, SheetEdge::Left)),
-            (SheetEdge::Right, outward_band(paper, SheetEdge::Right)),
-            (SheetEdge::Top, outward_band(paper, SheetEdge::Top)),
-            (SheetEdge::Bottom, outward_band(paper, SheetEdge::Bottom)),
-        ];
-        if let Some(n) = &self.note {
-            if n.sheet_join == SheetJoin::Separate {
-                if let Some(p) = n.pages.get(page) {
-                    if n.cell_taken(p.col - 1, p.row) {
-                        tabs[0].1 = Rect::NOTHING;
-                    }
-                    if n.cell_taken(p.col + 1, p.row) {
-                        tabs[1].1 = Rect::NOTHING;
-                    }
-                    if n.cell_taken(p.col, p.row - 1) {
-                        tabs[2].1 = Rect::NOTHING;
-                    }
-                    if n.cell_taken(p.col, p.row + 1) {
-                        tabs[3].1 = Rect::NOTHING;
-                    }
-                }
-            }
-        }
-        tabs
-    }
-
-    fn page_screen_rect(&self, canvas: Rect, page: usize) -> Option<Rect> {
-        let n = self.note.as_ref()?;
-        let (pw, ph) = n.page_size();
-        let origin = self.origin_of(page);
-        let min = self.camera.to_screen(Pos2::new(origin.x, origin.y), canvas);
+    fn unit_screen_rect(&self, canvas: Rect, col: i32, row: i32) -> Rect {
+        let o = page_origin(col, row, PAGE_W, PAGE_H, self.gap());
+        let min = self.camera.to_screen(Pos2::new(o.x, o.y), canvas);
         let max = self
             .camera
-            .to_screen(Pos2::new(origin.x + pw, origin.y + ph), canvas);
-        Some(Rect::from_min_max(min, max))
+            .to_screen(Pos2::new(o.x + PAGE_W, o.y + PAGE_H), canvas);
+        Rect::from_min_max(min, max)
     }
 
-    fn sheet_tab_at(&self, screen: Pos2, canvas: Rect) -> Option<SheetEdge> {
+    fn sheet_tabs(&self, canvas: Rect) -> Vec<(i32, i32, Rect)> {
+        let Some(n) = &self.note else {
+            return Vec::new();
+        };
+        if canvas.width() < 10.0 {
+            return Vec::new();
+        }
+        n.unit_tabs()
+            .into_iter()
+            .filter_map(|t| {
+                let hit = if t.center {
+                    let hole = self.unit_screen_rect(canvas, t.dest_col, t.dest_row);
+                    if hole.width() < 8.0 || hole.height() < 8.0 {
+                        return None;
+                    }
+                    center_band(hole)
+                } else {
+                    let edge = match (t.dcol, t.drow) {
+                        (-1, 0) => SheetEdge::Left,
+                        (1, 0) => SheetEdge::Right,
+                        (0, -1) => SheetEdge::Top,
+                        (0, 1) => SheetEdge::Bottom,
+                        _ => return None,
+                    };
+                    let paper = self.unit_screen_rect(canvas, t.src_col, t.src_row);
+                    if paper.width() < 8.0 || paper.height() < 8.0 {
+                        return None;
+                    }
+                    outward_band(paper, edge)
+                };
+                Some((t.dest_col, t.dest_row, hit))
+            })
+            .collect()
+    }
+
+    fn sheet_tab_at(&self, screen: Pos2, canvas: Rect) -> Option<(i32, i32)> {
         if self.note.is_none() || canvas.width() < 10.0 {
             return None;
         }
         self.sheet_tabs(canvas)
             .into_iter()
-            .find(|(_, r)| r.contains(screen))
-            .map(|(e, _)| e)
+            .filter(|(_, _, r)| r.contains(screen))
+            .min_by(|a, b| {
+                let da = a.2.center().distance(screen);
+                let db = b.2.center().distance(screen);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(c, r, _)| (c, r))
     }
 
-    /// Adds a strip. The clicked edge stays under the "+", and the ink slides.
-    fn grow_sheet(&mut self, edge: SheetEdge) {
-        let view = self.canvas_rect;
-        let step = match edge {
-            SheetEdge::Left | SheetEdge::Right => PAGE_W,
-            SheetEdge::Top | SheetEdge::Bottom => PAGE_H,
-        };
-        let page_i = self.page_in_view(view);
-        let (col, row) = self
-            .note
-            .as_ref()
-            .and_then(|n| n.pages.get(page_i))
-            .map(|p| (p.col, p.row))
-            .unwrap_or((0, 0));
-        self.push_snapshot();
-        let z = self.camera.zoom;
-        if let Some(n) = &mut self.note {
-            match edge {
-                SheetEdge::Right => n.page_w += step,
-                SheetEdge::Bottom => n.page_h += step,
-                SheetEdge::Left => {
-                    n.page_w += step;
-                    for p in &mut n.pages {
-                        p.translate(vec2(step, 0.0));
-                    }
-                }
-                SheetEdge::Top => {
-                    n.page_h += step;
-                    for p in &mut n.pages {
-                        p.translate(vec2(0.0, step));
-                    }
-                }
-            }
-        }
-        if let Some((_, live)) = &mut self.live {
-            match edge {
-                SheetEdge::Left => live.translate(vec2(step, 0.0)),
-                SheetEdge::Top => live.translate(vec2(0.0, step)),
-                _ => {}
-            }
-        }
-        if let Some(preview) = &mut self.shape_preview {
-            match edge {
-                SheetEdge::Left => preview.translate(vec2(step, 0.0)),
-                SheetEdge::Top => preview.translate(vec2(0.0, step)),
-                _ => {}
-            }
-        }
-        if let Some(anchor) = &mut self.shape_anchor {
-            match edge {
-                SheetEdge::Left => anchor.x += step,
-                SheetEdge::Top => anchor.y += step,
-                _ => {}
-            }
-        }
-        match edge {
-            SheetEdge::Right => self.camera.pan.x -= (col as f32 + 1.0) * step * z,
-            SheetEdge::Left => self.camera.pan.x -= col as f32 * step * z,
-            SheetEdge::Bottom => self.camera.pan.y -= (row as f32 + 1.0) * step * z,
-            SheetEdge::Top => self.camera.pan.y -= row as f32 * step * z,
-        }
-        self.lasso.clear();
-        self.mark_dirty();
-    }
-
-    fn insert_sheet(&mut self, edge: SheetEdge) {
-        let view = self.canvas_rect;
-        let page_i = self.page_in_view(view);
-        let (col, row) = self
-            .note
-            .as_ref()
-            .and_then(|n| n.pages.get(page_i))
-            .map(|p| (p.col, p.row))
-            .unwrap_or((0, 0));
-        let (dcol, drow) = match edge {
-            SheetEdge::Right => (1, 0),
-            SheetEdge::Left => (-1, 0),
-            SheetEdge::Bottom => (0, 1),
-            SheetEdge::Top => (0, -1),
-        };
-        let dest = (col + dcol, row + drow);
+    fn add_sheet_from_tab(&mut self, col: i32, row: i32) {
         if self
             .note
             .as_ref()
-            .is_some_and(|n| n.cell_taken(dest.0, dest.1))
+            .is_none_or(|n| n.unit_occupied(col, row))
         {
             return;
         }
+        self.finish_live();
+        self.finish_text_edit();
+        self.clear_shape_hold();
         self.push_snapshot();
         if let Some(n) = &mut self.note {
-            n.pages.push(Page::at(dest.0, dest.1));
+            n.add_unit_at(col, row);
         }
+        self.sel.clear();
         self.lasso.clear();
         self.mark_dirty();
     }
@@ -5049,7 +5184,7 @@ impl CahierApp {
         }
         let hover = ui.input(|i| i.pointer.hover_pos());
         let (wash, plus, wash_hot, plus_hot) = sheet_tab_colors(self.look.desk);
-        for (_, hit) in self.sheet_tabs(canvas) {
+        for (_, _, hit) in self.sheet_tabs(canvas) {
             if !hit.is_positive() {
                 continue;
             }
@@ -5060,6 +5195,77 @@ impl CahierApp {
                 if hot { wash_hot } else { wash },
                 if hot { plus_hot } else { plus },
             );
+        }
+    }
+
+    fn page_folds(&self, canvas: Rect) -> Vec<(i32, i32, Rect)> {
+        let Some(n) = &self.note else {
+            return Vec::new();
+        };
+        if !n.can_tear_unit() || canvas.width() < 10.0 {
+            return Vec::new();
+        }
+        let z = self.camera.zoom;
+        n.unit_cells()
+            .into_iter()
+            .filter_map(|(col, row)| {
+                let paper = self.unit_screen_rect(canvas, col, row);
+                if paper.width() < 8.0 || paper.height() < 8.0 {
+                    return None;
+                }
+                Some((col, row, fold_hit_rect(paper, z)))
+            })
+            .collect()
+    }
+
+    fn fold_at(&self, screen: Pos2, canvas: Rect) -> Option<(i32, i32)> {
+        self.page_folds(canvas)
+            .into_iter()
+            .filter(|(_, _, r)| r.contains(screen))
+            .min_by(|a, b| {
+                let da = a.2.center().distance(screen);
+                let db = b.2.center().distance(screen);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(c, r, _)| (c, r))
+    }
+
+    fn tear_sheet_at(&mut self, col: i32, row: i32) {
+        if self
+            .note
+            .as_ref()
+            .is_none_or(|n| !n.can_tear_unit() || !n.unit_occupied(col, row))
+        {
+            return;
+        }
+        self.finish_live();
+        self.finish_text_edit();
+        self.clear_shape_hold();
+        self.push_snapshot();
+        if let Some(n) = &mut self.note {
+            n.remove_unit(col, row);
+        }
+        self.sel.clear();
+        self.lasso.clear();
+        self.editing_text = None;
+        self.mark_dirty();
+    }
+
+    fn paint_page_folds(&self, ui: &Ui, painter: &Painter, canvas: Rect) {
+        let Some(n) = &self.note else {
+            return;
+        };
+        if !n.can_tear_unit() {
+            return;
+        }
+        let hover = ui.input(|i| i.pointer.hover_pos());
+        let z = self.camera.zoom;
+        let rest = self.look.paper_rule_strong;
+        let hot_c = self.look.rust();
+        for (col, row, hit) in self.page_folds(canvas) {
+            let paper = self.unit_screen_rect(canvas, col, row);
+            let hot = hover.is_some_and(|p| hit.contains(p));
+            paint_page_fold(painter, paper, z, if hot { hot_c } else { rest });
         }
     }
 
@@ -5246,7 +5452,9 @@ impl CahierApp {
             return;
         }
         if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
-            if self.sheet_tab_at(p, self.canvas_rect).is_some() {
+            if self.sheet_tab_at(p, self.canvas_rect).is_some()
+                || self.fold_at(p, self.canvas_rect).is_some()
+            {
                 ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                 return;
             }
@@ -5591,37 +5799,31 @@ fn mix_col(a: Color32, b: Color32, t: f32) -> Color32 {
 
 const WHEEL_IN: f32 = 56.0;
 const WHEEL_OUT: f32 = 152.0;
-const WHEEL_LIFT: f32 = 72.0;
+const WHEEL_HOLD: f64 = 0.35;
+const COLOR_HOLD: f64 = 0.35;
 const PAPER_TILE: f32 = 168.0;
 
-fn wheel_hit(
-    origin: Pos2,
-    pos: Pos2,
-    colors: bool,
-    n_cloth: usize,
-) -> (bool, Option<WheelPick>) {
+fn wheel_hit(origin: Pos2, pos: Pos2, colors: bool, n_cloth: usize) -> Option<WheelPick> {
     let v = pos - origin;
     let r = v.length();
-    if r < WHEEL_IN {
-        return (colors, None);
-    }
-    if r > WHEEL_OUT + 48.0 {
-        return (colors, None);
+    if r < WHEEL_IN || r > WHEEL_OUT + 48.0 {
+        return None;
     }
     let a = (v.angle() + std::f32::consts::FRAC_PI_2).rem_euclid(std::f32::consts::TAU);
     if colors {
         let n = n_cloth.max(1);
         let i = ((a / std::f32::consts::TAU) * n as f32).floor() as usize % n;
-        return (true, Some(WheelPick::Cloth(i as u8)));
+        return Some(WheelPick::Cloth(i as u8));
     }
     let i = ((a / std::f32::consts::TAU) * 4.0).floor() as usize % 4;
-    let pick = [
-        WheelPick::Pin,
-        WheelPick::Color,
-        WheelPick::Trash,
-        WheelPick::Mark,
-    ][i];
-    (matches!(pick, WheelPick::Color), Some(pick))
+    Some(
+        [
+            WheelPick::Pin,
+            WheelPick::Color,
+            WheelPick::Trash,
+            WheelPick::Mark,
+        ][i],
+    )
 }
 
 fn slice_mid(origin: Pos2, i: usize, n: usize, r: f32) -> Pos2 {
@@ -5725,6 +5927,12 @@ fn outward_band(paper: Rect, edge: SheetEdge) -> Rect {
     }
 }
 
+fn center_band(paper: Rect) -> Rect {
+    let w = paper.width() * 0.42;
+    let h = paper.height() * 0.28;
+    Rect::from_center_size(paper.center(), vec2(w, h))
+}
+
 fn sheet_tab_colors(desk: Color32) -> (Color32, Color32, Color32, Color32) {
     let lum = desk.r() as u16 + desk.g() as u16 + desk.b() as u16;
     if lum < 420 {
@@ -5742,6 +5950,24 @@ fn sheet_tab_colors(desk: Color32) -> (Color32, Color32, Color32, Color32) {
             Color32::from_black_alpha(110),
         )
     }
+}
+
+fn fold_hit_rect(paper: Rect, zoom: f32) -> Rect {
+    let s = (24.0 * zoom).clamp(20.0, 52.0);
+    Rect::from_min_max(
+        pos2(paper.max.x - s, paper.min.y),
+        pos2(paper.max.x, paper.min.y + s),
+    )
+}
+
+fn paint_page_fold(p: &Painter, paper: Rect, zoom: f32, color: Color32) {
+    let s = 16.0 * zoom;
+    let fold = [
+        pos2(paper.max.x, paper.min.y),
+        pos2(paper.max.x - s, paper.min.y),
+        pos2(paper.max.x, paper.min.y + s),
+    ];
+    p.add(Shape::convex_polygon(fold.to_vec(), color, Stroke::NONE));
 }
 
 fn paint_sheet_tab(p: &Painter, rect: Rect, wash: Color32, plus: Color32) {

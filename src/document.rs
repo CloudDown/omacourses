@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ink::{InkPoint, InkStroke, Nib};
 use chrono::{DateTime, Utc};
@@ -33,6 +33,19 @@ impl SheetJoin {
             SheetJoin::Separate => PAGE_GAP,
         }
     }
+}
+
+/// One “+” that would create the unit at `(dest_col, dest_row)`.
+/// `center` is true when several edges share that hole (diagonal / gap).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnitTab {
+    pub dest_col: i32,
+    pub dest_row: i32,
+    pub src_col: i32,
+    pub src_row: i32,
+    pub dcol: i32,
+    pub drow: i32,
+    pub center: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,20 +183,6 @@ impl Page {
     }
 }
 
-impl Page {
-    pub fn translate(&mut self, d: Vec2) {
-        for s in &mut self.strokes {
-            s.translate(d);
-        }
-        for t in &mut self.texts {
-            t.translate(d);
-        }
-        for im in &mut self.images {
-            im.translate(d);
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Note {
     pub id: Uuid,
@@ -235,6 +234,120 @@ impl Note {
         self.pages.iter().any(|p| p.col == col && p.row == row)
     }
 
+    /// Unit A4 cells covered by the notebook, including a grown linked sheet.
+    pub fn unit_cells(&self) -> Vec<(i32, i32)> {
+        if let [p] = self.pages.as_slice() {
+            let cols = tiles_along(self.page_w, PAGE_W);
+            let rows = tiles_along(self.page_h, PAGE_H);
+            if cols > 1 || rows > 1 {
+                let mut cells = Vec::with_capacity((cols * rows) as usize);
+                for r in 0..rows {
+                    for c in 0..cols {
+                        cells.push((p.col + c, p.row + r));
+                    }
+                }
+                return cells;
+            }
+        }
+        self.pages.iter().map(|p| (p.col, p.row)).collect()
+    }
+
+    pub fn unit_occupied(&self, col: i32, row: i32) -> bool {
+        if self.is_grown_single() {
+            self.unit_cells().iter().any(|&c| c == (col, row))
+        } else {
+            self.cell_taken(col, row)
+        }
+    }
+
+    /// Free sides of each unit cell: `(col, row, dcol, drow)`.
+    pub fn free_unit_edges(&self) -> Vec<(i32, i32, i32, i32)> {
+        let cells = self.unit_cells();
+        let occupied: BTreeSet<_> = cells.iter().copied().collect();
+        let mut out = Vec::new();
+        for &(col, row) in &cells {
+            for (dcol, drow) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                if !occupied.contains(&(col + dcol, row + drow)) {
+                    out.push((col, row, dcol, drow));
+                }
+            }
+        }
+        out
+    }
+
+    /// One tab per empty destination. Shared holes (diagonal neighbors) get a center tab.
+    pub fn unit_tabs(&self) -> Vec<UnitTab> {
+        let mut by_dest: BTreeMap<(i32, i32), Vec<(i32, i32, i32, i32)>> = BTreeMap::new();
+        for (col, row, dcol, drow) in self.free_unit_edges() {
+            by_dest
+                .entry((col + dcol, row + drow))
+                .or_default()
+                .push((col, row, dcol, drow));
+        }
+        by_dest
+            .into_iter()
+            .map(|(dest, srcs)| {
+                let (src_col, src_row, dcol, drow) = srcs[0];
+                UnitTab {
+                    dest_col: dest.0,
+                    dest_row: dest.1,
+                    src_col,
+                    src_row,
+                    dcol,
+                    drow,
+                    center: srcs.len() >= 2,
+                }
+            })
+            .collect()
+    }
+
+    pub fn is_grown_single(&self) -> bool {
+        self.pages.len() == 1
+            && (tiles_along(self.page_w, PAGE_W) > 1 || tiles_along(self.page_h, PAGE_H) > 1)
+    }
+
+    /// Splits a grown linked sheet into unit pages, keeping `sheet_join`.
+    pub fn explode_grown_units(&mut self) {
+        self.split_grown_to_unit_pages();
+    }
+
+    /// Adds the neighbor of unit `(col, row)`.
+    pub fn add_unit_neighbor(&mut self, col: i32, row: i32, dcol: i32, drow: i32) -> bool {
+        self.add_unit_at(col + dcol, row + drow)
+    }
+
+    pub fn add_unit_at(&mut self, col: i32, row: i32) -> bool {
+        if self.unit_occupied(col, row) {
+            return false;
+        }
+        if self.is_grown_single() {
+            self.explode_grown_units();
+        }
+        self.pages.push(Page::at(col, row));
+        true
+    }
+
+    pub fn can_tear_unit(&self) -> bool {
+        self.unit_cells().len() > 1
+    }
+
+    /// Tears out one unit. The last sheet stays.
+    pub fn remove_unit(&mut self, col: i32, row: i32) -> bool {
+        if !self.can_tear_unit() || !self.unit_occupied(col, row) {
+            return false;
+        }
+        if self.is_grown_single() {
+            self.explode_grown_units();
+        }
+        self.pages.retain(|p| !(p.col == col && p.row == row));
+        if self.pages.is_empty() {
+            self.pages.push(Page::default());
+        }
+        self.page_w = PAGE_W;
+        self.page_h = PAGE_H;
+        true
+    }
+
     /// Old notes stacked pages by vec index with no col/row. Spread them vertically.
     pub fn normalize_page_grid(&mut self) {
         if self.pages.len() <= 1 {
@@ -247,111 +360,84 @@ impl Note {
         }
     }
 
-    /// Rebuilds the notebook as one continuous sheet or as equal unit pages.
-    /// Linked ↔ Separate is reversible at `PAGE_W` × `PAGE_H`.
+    /// Linked keeps the same cells (holes stay holes) and only changes the join.
+    /// A grown rectangle is split into unit pages when switching to Separate.
     pub fn apply_sheet_join(&mut self, to: SheetJoin) {
         if self.pages.is_empty() {
             self.pages.push(Page::default());
         }
-        let (ow, oh) = self.page_size();
+        if to == SheetJoin::Separate && self.is_grown_single() {
+            self.split_grown_to_unit_pages();
+        }
+        self.sheet_join = to;
+        if !self.is_grown_single() {
+            self.page_w = PAGE_W;
+            self.page_h = PAGE_H;
+        }
+    }
+
+    fn split_grown_to_unit_pages(&mut self) {
+        if !self.is_grown_single() {
+            return;
+        }
+        let p = self.pages[0].clone();
         let tw = PAGE_W;
         let th = PAGE_H;
-        let mut min_c = i32::MAX;
-        let mut min_r = i32::MAX;
-        let mut max_c = i32::MIN;
-        let mut max_r = i32::MIN;
-        for p in &self.pages {
-            min_c = min_c.min(p.col);
-            min_r = min_r.min(p.row);
-            max_c = max_c.max(p.col);
-            max_r = max_r.max(p.row);
-        }
-        let origin_x = min_c as f32 * ow;
-        let origin_y = min_r as f32 * oh;
-        let cover_w = (max_c - min_c + 1) as f32 * ow;
-        let cover_h = (max_r - min_r + 1) as f32 * oh;
-        let cols = tiles_along(cover_w, tw);
-        let rows = tiles_along(cover_h, th);
-
-        let mut strokes = Vec::new();
-        let mut texts = Vec::new();
-        let mut images = Vec::new();
-        for p in &self.pages {
-            let dx = p.col as f32 * ow - origin_x;
-            let dy = p.row as f32 * oh - origin_y;
-            let shift = Vec2::new(dx, dy);
-            for mut s in p.strokes.iter().cloned() {
-                s.translate(shift);
-                strokes.push(s);
-            }
-            for mut t in p.texts.iter().cloned() {
-                t.translate(shift);
-                texts.push(t);
-            }
-            for mut im in p.images.iter().cloned() {
-                im.translate(shift);
-                images.push(im);
+        let cols = tiles_along(self.page_w, tw);
+        let rows = tiles_along(self.page_h, th);
+        let mut tiles: BTreeMap<(i32, i32), Page> = BTreeMap::new();
+        for r in 0..rows {
+            for c in 0..cols {
+                tiles.insert((p.col + c, p.row + r), Page::at(p.col + c, p.row + r));
             }
         }
-
-        self.sheet_join = to;
-        match to {
-            SheetJoin::Linked => {
-                self.page_w = cols as f32 * tw;
-                self.page_h = rows as f32 * th;
-                self.pages = vec![Page {
-                    strokes,
-                    texts,
-                    images,
-                    col: 0,
-                    row: 0,
-                }];
-            }
-            SheetJoin::Separate => {
-                self.page_w = tw;
-                self.page_h = th;
-                let mut tiles: BTreeMap<(i32, i32), Page> = BTreeMap::new();
-                for r in 0..rows {
-                    for c in 0..cols {
-                        tiles.insert((c, r), Page::at(c, r));
-                    }
-                }
-                for s in strokes {
-                    for (c, r, mut piece) in split_stroke_across_tiles(&s, tw, th) {
-                        let (c, r) = clamp_cell(c, r, cols, rows);
-                        piece.translate(Vec2::new(-(c as f32 * tw), -(r as f32 * th)));
-                        tiles.entry((c, r)).or_insert_with(|| Page::at(c, r)).strokes.push(piece);
-                    }
-                }
-                for mut t in texts {
-                    let (c, r) = clamp_cell(
-                        (t.pos[0] / tw).floor() as i32,
-                        (t.pos[1] / th).floor() as i32,
-                        cols,
-                        rows,
-                    );
-                    t.pos[0] -= c as f32 * tw;
-                    t.pos[1] -= r as f32 * th;
-                    tiles.entry((c, r)).or_insert_with(|| Page::at(c, r)).texts.push(t);
-                }
-                for mut im in images {
-                    let (c, r) = clamp_cell(
-                        (im.pos[0] / tw).floor() as i32,
-                        (im.pos[1] / th).floor() as i32,
-                        cols,
-                        rows,
-                    );
-                    im.pos[0] -= c as f32 * tw;
-                    im.pos[1] -= r as f32 * th;
-                    tiles
-                        .entry((c, r))
-                        .or_insert_with(|| Page::at(c, r))
-                        .images
-                        .push(im);
-                }
-                self.pages = tiles.into_values().collect();
+        for s in &p.strokes {
+            for (c, r, mut piece) in split_stroke_across_tiles(s, tw, th) {
+                let (c, r) = clamp_cell(c, r, cols, rows);
+                piece.translate(Vec2::new(-(c as f32 * tw), -(r as f32 * th)));
+                let key = (p.col + c, p.row + r);
+                tiles
+                    .entry(key)
+                    .or_insert_with(|| Page::at(key.0, key.1))
+                    .strokes
+                    .push(piece);
             }
         }
+        for mut t in p.texts {
+            let (c, r) = clamp_cell(
+                (t.pos[0] / tw).floor() as i32,
+                (t.pos[1] / th).floor() as i32,
+                cols,
+                rows,
+            );
+            t.pos[0] -= c as f32 * tw;
+            t.pos[1] -= r as f32 * th;
+            let key = (p.col + c, p.row + r);
+            tiles
+                .entry(key)
+                .or_insert_with(|| Page::at(key.0, key.1))
+                .texts
+                .push(t);
+        }
+        for mut im in p.images {
+            let (c, r) = clamp_cell(
+                (im.pos[0] / tw).floor() as i32,
+                (im.pos[1] / th).floor() as i32,
+                cols,
+                rows,
+            );
+            im.pos[0] -= c as f32 * tw;
+            im.pos[1] -= r as f32 * th;
+            let key = (p.col + c, p.row + r);
+            tiles
+                .entry(key)
+                .or_insert_with(|| Page::at(key.0, key.1))
+                .images
+                .push(im);
+        }
+        self.page_w = tw;
+        self.page_h = th;
+        self.pages = tiles.into_values().collect();
     }
 }
 
@@ -518,16 +604,86 @@ mod tests {
     }
 
     #[test]
-    fn linked_merges_grid_into_one_sheet() {
+    fn linked_keeps_holes() {
         let mut n = Note::blank("t", 0);
         n.sheet_join = SheetJoin::Separate;
-        n.pages = vec![Page::at(0, 0), Page::at(1, 0)];
+        n.pages = vec![Page::at(0, 0), Page::at(1, 0), Page::at(0, 1)];
         n.pages[1].strokes.push(mark(40.0, 8.0));
         n.apply_sheet_join(SheetJoin::Linked);
-        assert_eq!(n.pages.len(), 1);
-        assert_eq!(n.page_w, PAGE_W * 2.0);
+        assert_eq!(n.sheet_join, SheetJoin::Linked);
+        assert_eq!(n.page_w, PAGE_W);
         assert_eq!(n.page_h, PAGE_H);
-        assert!((n.pages[0].strokes[0].points[0].x - (PAGE_W + 40.0)).abs() < 0.01);
+        let mut cells: Vec<_> = n.pages.iter().map(|p| (p.col, p.row)).collect();
+        cells.sort();
+        assert_eq!(cells, vec![(0, 0), (0, 1), (1, 0)]);
+        let right = n.pages.iter().find(|p| p.col == 1 && p.row == 0).unwrap();
+        assert_eq!(right.strokes[0].points[0].x, 40.0);
+    }
+
+    #[test]
+    fn unit_cells_pave_grown_sheet() {
+        let mut n = Note::blank("t", 0);
+        n.page_w = PAGE_W * 2.0;
+        n.page_h = PAGE_H * 2.0;
+        let mut cells = n.unit_cells();
+        cells.sort();
+        assert_eq!(cells, vec![(0, 0), (0, 1), (1, 0), (1, 1)]);
+        assert_eq!(n.free_unit_edges().len(), 8);
+        assert!(n.unit_tabs().iter().all(|t| !t.center));
+        assert_eq!(n.unit_tabs().len(), 8);
+    }
+
+    #[test]
+    fn diagonal_pages_share_center_tabs() {
+        let mut n = Note::blank("t", 0);
+        n.sheet_join = SheetJoin::Separate;
+        n.pages = vec![Page::at(0, 0), Page::at(1, 1)];
+        let tabs = n.unit_tabs();
+        let mut dests: Vec<_> = tabs.iter().map(|t| (t.dest_col, t.dest_row)).collect();
+        dests.sort();
+        dests.dedup();
+        assert_eq!(dests.len(), tabs.len());
+        let mut centers: Vec<_> = tabs
+            .iter()
+            .filter(|t| t.center)
+            .map(|t| (t.dest_col, t.dest_row))
+            .collect();
+        centers.sort();
+        assert_eq!(centers, vec![(0, 1), (1, 0)]);
+        assert_eq!(tabs.len(), 6);
+    }
+
+    #[test]
+    fn linked_add_right_on_strip_keeps_units() {
+        let mut n = Note::blank("t", 0);
+        n.page_w = PAGE_W * 2.0;
+        n.pages[0].strokes.push(mark(10.0, 12.0));
+        assert!(n.add_unit_neighbor(1, 0, 1, 0));
+        assert_eq!(n.sheet_join, SheetJoin::Linked);
+        assert_eq!(n.page_w, PAGE_W);
+        assert_eq!(n.page_h, PAGE_H);
+        let mut cells: Vec<_> = n.pages.iter().map(|p| (p.col, p.row)).collect();
+        cells.sort();
+        assert_eq!(cells, vec![(0, 0), (1, 0), (2, 0)]);
+        let home = n.pages.iter().find(|p| p.col == 0 && p.row == 0).unwrap();
+        assert_eq!(home.strokes[0].points[0].x, 10.0);
+    }
+
+    #[test]
+    fn linked_add_on_block_keeps_one_cell() {
+        let mut n = Note::blank("t", 0);
+        n.page_w = PAGE_W * 2.0;
+        n.page_h = PAGE_H * 2.0;
+        n.pages[0].strokes.push(mark(10.0, 12.0));
+        assert!(n.add_unit_neighbor(1, 0, 1, 0));
+        assert_eq!(n.sheet_join, SheetJoin::Linked);
+        assert_eq!(n.page_w, PAGE_W);
+        assert_eq!(n.page_h, PAGE_H);
+        let mut cells: Vec<_> = n.pages.iter().map(|p| (p.col, p.row)).collect();
+        cells.sort();
+        assert_eq!(cells, vec![(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)]);
+        let home = n.pages.iter().find(|p| p.col == 0 && p.row == 0).unwrap();
+        assert_eq!(home.strokes[0].points[0].x, 10.0);
     }
 
     #[test]
@@ -538,11 +694,51 @@ mod tests {
         n.pages[0].strokes.push(mark(PAGE_W + 5.0, PAGE_H + 6.0));
         n.apply_sheet_join(SheetJoin::Separate);
         n.apply_sheet_join(SheetJoin::Linked);
+        assert_eq!(n.sheet_join, SheetJoin::Linked);
+        assert_eq!(n.pages.len(), 4);
+        assert_eq!(n.page_w, PAGE_W);
+        assert_eq!(n.page_h, PAGE_H);
+        let p = n
+            .pages
+            .iter()
+            .find(|p| p.col == 1 && p.row == 1)
+            .unwrap();
+        let pt = &p.strokes[0].points[0];
+        assert!((pt.x - 5.0).abs() < 0.05);
+        assert!((pt.y - 6.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn tear_unit_keeps_the_rest() {
+        let mut n = Note::blank("t", 0);
+        n.sheet_join = SheetJoin::Separate;
+        n.pages = vec![Page::at(0, 0), Page::at(1, 0), Page::at(0, 1)];
+        n.pages[1].strokes.push(mark(4.0, 5.0));
+        assert!(n.remove_unit(0, 0));
+        let mut cells: Vec<_> = n.pages.iter().map(|p| (p.col, p.row)).collect();
+        cells.sort();
+        assert_eq!(cells, vec![(0, 1), (1, 0)]);
+        let right = n.pages.iter().find(|p| p.col == 1).unwrap();
+        assert_eq!(right.strokes[0].points[0].x, 4.0);
+    }
+
+    #[test]
+    fn tear_last_unit_is_refused() {
+        let mut n = Note::blank("t", 0);
+        assert!(!n.can_tear_unit());
+        assert!(!n.remove_unit(0, 0));
         assert_eq!(n.pages.len(), 1);
-        assert_eq!(n.page_w, PAGE_W * 2.0);
-        assert_eq!(n.page_h, PAGE_H * 2.0);
-        let p = &n.pages[0].strokes[0].points[0];
-        assert!((p.x - (PAGE_W + 5.0)).abs() < 0.05);
-        assert!((p.y - (PAGE_H + 6.0)).abs() < 0.05);
+    }
+
+    #[test]
+    fn tear_from_grown_sheet_explodes() {
+        let mut n = Note::blank("t", 0);
+        n.page_w = PAGE_W * 2.0;
+        n.pages[0].strokes.push(mark(10.0, 12.0));
+        n.pages[0].strokes.push(mark(PAGE_W + 40.0, 8.0));
+        assert!(n.remove_unit(1, 0));
+        assert_eq!(n.pages.len(), 1);
+        assert_eq!(n.pages[0].col, 0);
+        assert_eq!(n.pages[0].strokes[0].points[0].x, 10.0);
     }
 }
