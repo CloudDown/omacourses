@@ -21,8 +21,8 @@ pub struct NoteMeta {
     pub slot: u32,
 }
 
-/// Shelf grid: 5 columns × 3 rows.
-pub const SHELF_COLS: u32 = 5;
+/// Shelf grid: 10 columns × 3 rows (fills a 16:9 lectern).
+pub const SHELF_COLS: u32 = 10;
 pub const SHELF_ROWS: u32 = 3;
 pub const SHELF_SLOTS: u32 = SHELF_COLS * SHELF_ROWS;
 
@@ -66,10 +66,17 @@ pub struct Index {
     /// `true` = tutorial folded away (button only).
     #[serde(default = "default_true")]
     pub fiche_pliee: bool,
+    /// Column count used when `slot` was written. Missing field = the old 5-wide shelf.
+    #[serde(default = "default_old_shelf_cols")]
+    pub shelf_cols: u32,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_old_shelf_cols() -> u32 {
+    5
 }
 
 impl Default for Index {
@@ -81,6 +88,7 @@ impl Default for Index {
             dock: DockEdge::default(),
             mode: NoteMode::default(),
             fiche_pliee: true,
+            shelf_cols: SHELF_COLS,
         }
     }
 }
@@ -119,7 +127,34 @@ impl Library {
     pub fn load_note(&self, id: Uuid) -> Option<Note> {
         let path = self.note_dir(id).join("note.json");
         let s = fs::read_to_string(path).ok()?;
-        serde_json::from_str(&s).ok()
+        let mut note: Note = serde_json::from_str(&s).ok()?;
+        note.normalize_page_grid();
+        Some(note)
+    }
+
+    /// Copies the notebook (JSON + media) onto a new id.
+    pub fn duplicate_note(&mut self, src: &Note) -> Option<Note> {
+        let mut copy = src.clone();
+        copy.id = Uuid::new_v4();
+        copy.title = if src.title.trim().is_empty() {
+            "Untitled copy".into()
+        } else {
+            format!("{} copy", src.title)
+        };
+        copy.created = Utc::now();
+        copy.touch();
+        copy.pinned = false;
+        let src_media = self.note_dir(src.id).join("media");
+        let dst_media = self.note_dir(copy.id).join("media");
+        let _ = fs::create_dir_all(&dst_media);
+        if let Ok(entries) = fs::read_dir(&src_media) {
+            for e in entries.flatten() {
+                let to = dst_media.join(e.file_name());
+                let _ = fs::copy(e.path(), to);
+            }
+        }
+        self.save_note(&copy);
+        Some(copy)
     }
 
     pub fn save_note(&mut self, note: &Note) {
@@ -160,6 +195,7 @@ impl Library {
     }
 
     fn ensure_slots(&mut self) {
+        self.remap_shelf_cols();
         let mut seen = HashSet::new();
         let clash = self.index.notes.iter().any(|n| !seen.insert(n.slot));
         let all_zero = self.index.notes.len() > 1 && self.index.notes.iter().all(|n| n.slot == 0);
@@ -190,6 +226,26 @@ impl Library {
         if dirty {
             self.save_index();
         }
+    }
+
+    fn remap_shelf_cols(&mut self) {
+        let old = self.index.shelf_cols.max(1);
+        if old == SHELF_COLS {
+            return;
+        }
+        let remap = |slot: u32| {
+            let col = slot % old;
+            let row = slot / old;
+            row * SHELF_COLS + col
+        };
+        for n in &mut self.index.notes {
+            n.slot = remap(n.slot);
+        }
+        for n in &mut self.index.trash {
+            n.slot = remap(n.slot);
+        }
+        self.index.shelf_cols = SHELF_COLS;
+        self.save_index();
     }
 
     /// Places notebooks on cells `dest`, `dest+1`, … (swap if occupied).
@@ -335,4 +391,21 @@ pub fn ensure_png(bytes: &[u8]) -> Option<Vec<u8>> {
 pub fn image_size(path: &Path) -> Option<(f32, f32)> {
     let img = image::open(path).ok()?;
     Some((img.width() as f32, img.height() as f32))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remap_5_to_10_keeps_rows() {
+        let old = 5u32;
+        let remap = |slot: u32| slot % old + (slot / old) * SHELF_COLS;
+        assert_eq!(remap(0), 0);
+        assert_eq!(remap(4), 4);
+        assert_eq!(remap(5), 10);
+        assert_eq!(remap(9), 14);
+        assert_eq!(remap(10), 20);
+        assert_eq!(remap(14), 24);
+    }
 }

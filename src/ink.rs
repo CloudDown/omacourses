@@ -59,6 +59,19 @@ impl Tool {
             Tool::Image => "Image",
         }
     }
+
+    pub fn emoji(self) -> Option<&'static str> {
+        match self {
+            Tool::Fineliner => Some("🖊️"),
+            Tool::Brush => Some("🖌️"),
+            Tool::Pencil => Some("✏️"),
+            Tool::Highlighter => Some("🖍️"),
+            Tool::EraserStroke => Some("🧼"),
+            Tool::EraserArea => Some("🧽"),
+            Tool::Lasso => Some("🪢"),
+            Tool::Text | Tool::Image => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]

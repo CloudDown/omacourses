@@ -49,6 +49,7 @@ The lectern follows the stylus: in range, the hand pans and the nib writes. Put 
 | `m` | cycle paper (blank, lined, grid, dotted, graph, slate) |
 | corners / `0` / click on % | fit to screen |
 | hold the pen still ~1s | line / arrow / triangle / square / diamond / ellipse / circle |
+| `ctrl+s` | save |
 | `ctrl+e` `ctrl+shift+e` | PNG, PDF |
 
 First launch: notebooks *Mindset* and *Art direction*.

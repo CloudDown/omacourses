@@ -22,7 +22,6 @@ pub struct Look {
     pub desk_edge: Color32,
     pub muted: Color32,
     pub fg: Color32,
-    pub fg_dim: Color32,
     pub accent: Color32,
     pub paper: Color32,
     pub paper_rule: Color32,
@@ -66,10 +65,6 @@ impl Look {
         let darker = g("darker_background", Color32::from_rgb(0x0e, 0x0e, 0x14));
         let lighter = g("lighter_background", Color32::from_rgb(0x24, 0x28, 0x3b));
         let fg = g("foreground", Color32::from_rgb(0xa9, 0xb1, 0xd6));
-        let fg_dim = g(
-            "light_foreground",
-            g("dark_foreground", Color32::from_rgb(0x56, 0x5f, 0x89)),
-        );
         let muted = g("muted", Color32::from_rgb(0x41, 0x48, 0x68));
         let red = g("red", Color32::from_rgb(0xf7, 0x76, 0x8e));
         let orange = g("orange", Color32::from_rgb(0xeb, 0x92, 0x7b));
@@ -127,7 +122,6 @@ impl Look {
             desk_edge: lighter,
             muted,
             fg,
-            fg_dim,
             accent,
             paper,
             paper_rule,
@@ -194,6 +188,11 @@ impl Look {
     /// Theme red (ink 3 / Omarchy `red`).
     pub fn rust(&self) -> Color32 {
         self.inks.get(2).copied().unwrap_or(self.accent)
+    }
+
+    /// Theme green (Omarchy `green`).
+    pub fn green(&self) -> Color32 {
+        self.inks.get(5).copied().unwrap_or(self.accent)
     }
 }
 

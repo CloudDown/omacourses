@@ -270,12 +270,6 @@ fn read_u32(data: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?))
 }
 
-/// Favorites shown at the head of the type case.
-pub const FAVORITES: &[&str] = &[
-    "📝", "📕", "📗", "📘", "📙", "📒", "📓", "✨", "💡", "🎯", "⭐", "🔥", "🌙", "☕", "🎵", "📐",
-    "🧪", "🧠", "💼", "🗂️", "📌", "🖤", "🌿", "🚀", "💎", "🔮",
-];
-
 #[cfg(test)]
 mod tests {
     use super::Atlas;
@@ -289,5 +283,17 @@ mod tests {
         assert!(atlas.catalog().len() > 200);
         let g = atlas.ensure_str("📝").expect("memo");
         assert!(g.width >= 24 && g.height >= 24);
+    }
+
+    #[test]
+    fn toolbar_emojis_decode() {
+        let mut atlas = Atlas::load();
+        if atlas.catalog().is_empty() {
+            return;
+        }
+        for em in ["🖊️", "🖌️", "✏️", "🖍️", "🧼", "🧽", "🪢", "🗑️"] {
+            let g = atlas.ensure_str(em).unwrap_or_else(|| panic!("missing {em}"));
+            assert!(g.width >= 24 && g.height >= 24, "{em}");
+        }
     }
 }

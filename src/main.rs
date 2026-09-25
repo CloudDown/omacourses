@@ -49,7 +49,7 @@ Gestures (inside a notebook):
   2nd button = lasso (hold)
   drag the pencil-case handle → top / bottom / sides
   hold the pen still ~1s ≈ line, arrow, triangle, square, diamond, ellipse, circle
-  ctrl+z/y   ctrl+e png   ctrl+shift+e pdf
+  ctrl+z/y   ctrl+s save   ctrl+e png   ctrl+shift+e pdf
 ";
 
 fn main() -> eframe::Result<()> {
