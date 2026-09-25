@@ -12,6 +12,18 @@ Local data only — `~/.local/share/omacourses`. No account, no sync.
 
 ![Graph paper — Art direction](docs/screens/millimetre.png)
 
+### Sheets & bin
+
+Linked pages share one flush sheet; Separate keeps a gutter. Each free edge gets a `+` tab (a shared hole gets one tab in the center). The wastebasket opens a red bin row under the shelf.
+
+![Linked pages — flush join](docs/screens/liees.png)
+
+![Separate pages — gutter between units](docs/screens/separees.png)
+
+![Sheet tabs — add a unit on any free edge](docs/screens/onglets.png)
+
+![Bin — trash row under the shelf](docs/screens/corbeille.png)
+
 ## Run
 
 ```bash
@@ -51,5 +63,23 @@ The lectern follows the stylus: in range, the hand pans and the nib writes. Put 
 | hold the pen still ~1s | line / arrow / triangle / square / diamond / ellipse / circle |
 | `ctrl+s` | save |
 | `ctrl+e` `ctrl+shift+e` | PNG, PDF |
+
+### Shelf
+
+| | |
+|---|---|
+| Right-click a spine (or hold a finger) | spine wheel — pin, color, trash, mark |
+| Wastebasket | open / close the bin row |
+| Drag onto the bin (or a bin cell) | trash the notebook |
+| Drag out of the bin | restore to the shelf |
+| Two-finger drag on the shelf | scroll |
+
+### Pages
+
+| | |
+|---|---|
+| `+` on a free edge | add a unit page there |
+| Fold corner (when more than one unit) | tear that unit off |
+| ⋯ → Linked / Separate | flush sheet vs gutter between pages |
 
 First launch: notebooks *Mindset* and *Art direction*.
