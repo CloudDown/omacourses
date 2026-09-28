@@ -311,11 +311,6 @@ impl Note {
         self.split_grown_to_unit_pages();
     }
 
-    /// Adds the neighbor of unit `(col, row)`.
-    pub fn add_unit_neighbor(&mut self, col: i32, row: i32, dcol: i32, drow: i32) -> bool {
-        self.add_unit_at(col + dcol, row + drow)
-    }
-
     pub fn add_unit_at(&mut self, col: i32, row: i32) -> bool {
         if self.unit_occupied(col, row) {
             return false;
@@ -658,7 +653,7 @@ mod tests {
         let mut n = Note::blank("t", 0);
         n.page_w = PAGE_W * 2.0;
         n.pages[0].strokes.push(mark(10.0, 12.0));
-        assert!(n.add_unit_neighbor(1, 0, 1, 0));
+        assert!(n.add_unit_at(2, 0));
         assert_eq!(n.sheet_join, SheetJoin::Linked);
         assert_eq!(n.page_w, PAGE_W);
         assert_eq!(n.page_h, PAGE_H);
@@ -675,7 +670,7 @@ mod tests {
         n.page_w = PAGE_W * 2.0;
         n.page_h = PAGE_H * 2.0;
         n.pages[0].strokes.push(mark(10.0, 12.0));
-        assert!(n.add_unit_neighbor(1, 0, 1, 0));
+        assert!(n.add_unit_at(2, 0));
         assert_eq!(n.sheet_join, SheetJoin::Linked);
         assert_eq!(n.page_w, PAGE_W);
         assert_eq!(n.page_h, PAGE_H);

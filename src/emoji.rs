@@ -51,12 +51,6 @@ impl Atlas {
         self.glyphs.get(&ch)
     }
 
-    #[allow(dead_code)]
-    pub fn ensure_str(&mut self, emoji: &str) -> Option<&Glyph> {
-        let ch = self.key(emoji)?;
-        self.ensure(ch)
-    }
-
     pub fn key(&self, emoji: &str) -> Option<char> {
         emoji.chars().find(|ch| {
             *ch != '\u{fe0f}' && *ch != '\u{fe0e}' && *ch != '\u{200d}' && self.catalog.contains(ch)
@@ -281,7 +275,8 @@ mod tests {
             return;
         }
         assert!(atlas.catalog().len() > 200);
-        let g = atlas.ensure_str("📝").expect("memo");
+        let key = atlas.key("📝").expect("memo key");
+        let g = atlas.ensure(key).expect("memo");
         assert!(g.width >= 24 && g.height >= 24);
     }
 
@@ -292,7 +287,8 @@ mod tests {
             return;
         }
         for em in ["🖊️", "🖌️", "✏️", "🖍️", "🧼", "🧽", "🪢", "🗑️"] {
-            let g = atlas.ensure_str(em).unwrap_or_else(|| panic!("missing {em}"));
+            let key = atlas.key(em).unwrap_or_else(|| panic!("missing key {em}"));
+            let g = atlas.ensure(key).unwrap_or_else(|| panic!("missing {em}"));
             assert!(g.width >= 24 && g.height >= 24, "{em}");
         }
     }

@@ -21,6 +21,23 @@ impl Default for Camera {
 }
 
 impl Camera {
+    pub fn valid_viewport(rect: Rect) -> bool {
+        rect.is_finite() && rect.width() > 10.0 && rect.height() > 10.0
+    }
+
+    /// Reframe a fitted page, or retain the document point at the viewport center.
+    pub fn resize_viewport(&mut self, previous: Rect, next: Rect, fitted: Option<(Vec2, Vec2)>) {
+        if !Self::valid_viewport(next) {
+            return;
+        }
+        if let Some((origin, size)) = fitted {
+            self.fit_page(next, origin, size.x, size.y);
+        } else if Self::valid_viewport(previous) {
+            let focus = self.to_paper(previous.center(), previous);
+            self.pan = next.size() * 0.5 - focus.to_vec2() * self.zoom;
+        }
+    }
+
     pub fn to_screen(self, paper: Pos2, rect: Rect) -> Pos2 {
         Pos2::new(
             rect.min.x + self.pan.x + paper.x * self.zoom,
@@ -72,18 +89,12 @@ impl Camera {
         let z_w = (rect.width() - margin * 2.0) / page_w.max(1.0);
         let z_fit = Self::fit_zoom(rect, page_w, page_h);
         self.zoom = z_w.max(z_fit * 1.7).clamp(ZOOM_MIN, ZOOM_MAX);
-        self.pan = Vec2::new(
-            margin - origin.x * self.zoom,
-            margin - origin.y * self.zoom,
-        );
+        self.pan = Vec2::new(margin - origin.x * self.zoom, margin - origin.y * self.zoom);
     }
 }
 
 pub fn page_origin(col: i32, row: i32, page_w: f32, page_h: f32, gap: f32) -> Vec2 {
-    Vec2::new(
-        col as f32 * (page_w + gap),
-        row as f32 * (page_h + gap),
-    )
+    Vec2::new(col as f32 * (page_w + gap), row as f32 * (page_h + gap))
 }
 
 /// Page whose sheet contains `p`, or the nearest sheet if `p` sits in a gutter.
@@ -140,5 +151,74 @@ mod tests {
         let o = page_origin(1, 0, PAGE_W, PAGE_H, 0.0);
         assert_eq!(o.x, PAGE_W);
         assert_eq!(o.y, 0.0);
+    }
+
+    #[test]
+    fn free_resize_preserves_document_center_and_zoom() {
+        let mut camera = Camera {
+            pan: Vec2::new(-620.0, 73.0),
+            zoom: 2.3,
+        };
+        let mut rect = Rect::from_min_size(Pos2::new(12.0, 64.0), Vec2::new(1200.0, 760.0));
+        let focus = camera.to_paper(rect.center(), rect);
+        for size in [
+            Vec2::new(820.0, 1100.0),
+            Vec2::new(1900.0, 600.0),
+            Vec2::new(1200.0, 760.0),
+        ] {
+            let next = Rect::from_min_size(Pos2::new(100.0, 32.0), size);
+            camera.resize_viewport(rect, next, None);
+            assert!(camera.to_paper(next.center(), next).distance(focus) < 0.001);
+            assert_eq!(camera.zoom, 2.3);
+            rect = next;
+        }
+    }
+
+    #[test]
+    fn fitted_resize_keeps_page_visible_centered_and_proportional() {
+        let origin = page_origin(2, -1, PAGE_W, PAGE_H, 0.0);
+        let size = Vec2::new(PAGE_W, PAGE_H);
+        let mut camera = Camera::default();
+        let mut previous = Rect::ZERO;
+        for extent in [
+            Vec2::new(800.0, 540.0),
+            Vec2::new(1700.0, 920.0),
+            Vec2::new(820.0, 1180.0),
+        ] {
+            let rect = Rect::from_min_size(Pos2::new(18.0, 76.0), extent);
+            camera.resize_viewport(previous, rect, Some((origin, size)));
+            let page = Rect::from_min_max(
+                camera.to_screen(origin.to_pos2(), rect),
+                camera.to_screen((origin + size).to_pos2(), rect),
+            );
+            assert!(rect.contains_rect(page));
+            assert!(page.center().distance(rect.center()) < 0.001);
+            assert!((page.aspect_ratio() - PAGE_W / PAGE_H).abs() < 0.0001);
+            previous = rect;
+        }
+    }
+
+    #[test]
+    fn invalid_viewports_do_not_modify_camera() {
+        let mut camera = Camera {
+            pan: Vec2::new(71.0, -144.0),
+            zoom: 1.7,
+        };
+        let old = camera;
+        let previous = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 800.0));
+        for rect in [
+            Rect::ZERO,
+            Rect::NOTHING,
+            Rect::EVERYTHING,
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 5.0)),
+        ] {
+            camera.resize_viewport(
+                previous,
+                rect,
+                Some((Vec2::ZERO, Vec2::new(PAGE_W, PAGE_H))),
+            );
+            assert_eq!(camera.pan, old.pan);
+            assert_eq!(camera.zoom, old.zoom);
+        }
     }
 }

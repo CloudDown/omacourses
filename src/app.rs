@@ -26,12 +26,18 @@ use crate::seed;
 use crate::tablet::{PenSnapshot, TabletBridge};
 use crate::undo::UndoStack;
 
+#[cfg(test)]
+mod tests;
+
 const DOS_W: f32 = 128.0;
 const DOS_H: f32 = 156.0;
 const DOS_PAD: f32 = 10.0;
 const PAPER_PEEK: f32 = 18.0;
 const TITLE_ROW: f32 = 44.0;
 const SHELF_GAP: f32 = 8.0;
+const TOSS_DURATION: f64 = 0.46;
+const BIN_DROP_RADIUS: f32 = 176.0;
+const QUARTER_DISK_CENTROID: f32 = 4.0 / (3.0 * std::f32::consts::PI);
 
 #[derive(Clone)]
 enum Scene {
@@ -160,6 +166,8 @@ pub struct CahierApp {
     last_ptr: Option<(Pos2, Instant)>,
     toast: Option<Toast>,
     need_fit: bool,
+    /// Cell kept fitted during viewport resizing; None means free navigation.
+    fitted_cell: Option<(i32, i32)>,
     /// Page to frame in writing view (top of the sheet).
     land_page: Option<usize>,
     title_buf: String,
@@ -198,6 +206,9 @@ pub struct CahierApp {
     shelf_anchor: Option<Uuid>,
     /// Red bin row open at the bottom of the shelf.
     shelf_trash: bool,
+    bin_panel_height: f32,
+    bin_handle_rect: Rect,
+    bin_handle_drag: Option<(Pos2, f32)>,
     /// Spine faces, for the selection rectangle.
     shelf_slots: Vec<(Uuid, Rect)>,
     /// Origin of the rectangle (None = no band).
@@ -220,6 +231,7 @@ pub struct CahierApp {
     shelf_toss: Vec<Toss>,
     trash_rect: Rect,
     trash_mouth: Pos2,
+    trash_reveal: f32,
     shelf_fed: bool,
     /// Long-press radial menu on a spine.
     spine_wheel: Option<SpineWheel>,
@@ -233,10 +245,30 @@ impl CahierApp {
         look.apply(&cc.egui_ctx);
         let mut lib = Library::open();
         seed::seed_if_needed(&mut lib);
+        let mut app = Self::with_library(look, lib);
+        if let Ok(q) = std::env::var("CAHIER_OPEN") {
+            let q = q.trim().to_lowercase();
+            if !q.is_empty() {
+                if let Some(id) = app
+                    .lib
+                    .index
+                    .notes
+                    .iter()
+                    .find(|m| m.title.to_lowercase().contains(&q))
+                    .map(|m| m.id)
+                {
+                    app.open_note(id);
+                }
+            }
+        }
+        app
+    }
+
+    fn with_library(look: Look, lib: Library) -> Self {
         let width = default_width(Nib::Fineliner);
         let dock_edge = lib.index.dock;
         let ink0 = look.inks.first().copied().unwrap_or(look.ink);
-        let mut app = Self {
+        Self {
             look,
             lib,
             scene: Scene::Shelf {
@@ -275,6 +307,7 @@ impl CahierApp {
             last_ptr: None,
             toast: None,
             need_fit: true,
+            fitted_cell: None,
             land_page: None,
             title_buf: String::new(),
             dock_edge,
@@ -299,6 +332,9 @@ impl CahierApp {
             shelf_sel: Vec::new(),
             shelf_anchor: None,
             shelf_trash: false,
+            bin_panel_height: 0.0,
+            bin_handle_rect: Rect::NOTHING,
+            bin_handle_drag: None,
             shelf_slots: Vec::new(),
             shelf_band: None,
             shelf_band_now: None,
@@ -315,26 +351,11 @@ impl CahierApp {
             shelf_toss: Vec::new(),
             trash_rect: Rect::NOTHING,
             trash_mouth: Pos2::ZERO,
+            trash_reveal: 0.0,
             shelf_fed: false,
             spine_wheel: None,
             shelf_hold_t0: None,
-        };
-        if let Ok(q) = std::env::var("CAHIER_OPEN") {
-            let q = q.trim().to_lowercase();
-            if !q.is_empty() {
-                if let Some(id) = app
-                    .lib
-                    .index
-                    .notes
-                    .iter()
-                    .find(|m| m.title.to_lowercase().contains(&q))
-                    .map(|m| m.id)
-                {
-                    app.open_note(id);
-                }
-            }
         }
-        app
     }
 
     fn toast(&mut self, msg: impl Into<String>, t: f64) {
@@ -419,7 +440,7 @@ impl CahierApp {
 
     fn fit_zoom_now(&self) -> f32 {
         let rect = self.canvas_rect;
-        if rect.width() < 10.0 {
+        if !Camera::valid_viewport(rect) {
             return 1.0;
         }
         let (pw, ph) = self
@@ -442,11 +463,12 @@ impl CahierApp {
 
     fn set_zoom_level(&mut self, level: f32) {
         let rect = self.canvas_rect;
-        if rect.width() < 10.0 {
+        if !Camera::valid_viewport(rect) {
             return;
         }
         let target = (self.fit_zoom_now() * level).max(0.001);
         self.camera.set_zoom_at(rect.center(), rect, target);
+        self.fitted_cell = None;
     }
 
     fn zoom_in(&mut self) {
@@ -510,6 +532,8 @@ impl CahierApp {
             self.editing_text = None;
             self.need_fit = false;
             self.land_page = Some(0);
+            self.fitted_cell = None;
+            self.canvas_rect = Rect::ZERO;
             self.textures.clear();
             self.tab_held = false;
         }
@@ -523,6 +547,8 @@ impl CahierApp {
         self.scene = Scene::Shelf {
             query: String::new(),
         };
+        self.canvas_rect = Rect::ZERO;
+        self.fitted_cell = None;
         self.undo.clear();
         self.sel.clear();
     }
@@ -603,6 +629,7 @@ impl CahierApp {
             let new_world = pos2(o.x + local.x, o.y + local.y);
             let z = self.camera.zoom;
             self.camera.pan = (focus - rect.min) - vec2(new_world.x * z, new_world.y * z);
+            self.fitted_cell = None;
         }
         self.sel.clear();
         self.lasso.clear();
@@ -1016,14 +1043,11 @@ impl CahierApp {
                     }
                 }
                 Scene::Shelf { .. } => {
-                    if !self.shelf_sel.is_empty() {
-                        self.shelf_sel.clear();
-                        self.shelf_anchor = None;
-                    } else if self.shelf_trash {
-                        self.shelf_trash = false;
-                    } else if self.emoji_pick.is_some() {
+                    // Shelf navigation is handled once in shelf_keys; modals take priority.
+                    if self.emoji_pick.is_some() {
                         self.emoji_pick = None;
                         self.emoji_query.clear();
+                        ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
                     }
                 }
             }
@@ -1221,9 +1245,8 @@ impl CahierApp {
         self.shelf_grid.clear();
         self.trash_grid.clear();
 
-        if self.bin_open() {
-            self.ui_bin_zone(ctx, &mut open, &mut select, &mut toggle, &mut range);
-        }
+        self.ui_bin_zone(ctx, &mut open, &mut select, &mut toggle, &mut range);
+        self.paint_trash_drop_zone(ctx);
 
         CentralPanel::default()
             .frame(Frame::NONE.fill(self.look.desk))
@@ -1388,42 +1411,33 @@ impl CahierApp {
             }
         }
 
-        // Wastebasket — drop corner of the lectern
-        Area::new(Id::new("fab-corbeille"))
-            .anchor(Align2::RIGHT_BOTTOM, vec2(-18.0, -16.0))
-            .order(Order::Foreground)
-            .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
-                ui.with_layout(Layout::top_down(Align::Center), |ui| {
-                    let n = self.lib.index.trash.len() + self.shelf_toss.len();
-                    if self.shelf_trash && n > 0 {
-                        if self
-                            .empty_bin_pull(ui)
-                            .on_hover_text("Empty the bin")
-                            .clicked()
-                        {
-                            self.lib.empty_trash();
+        // Keep the drag target represented by the large icon in the bin panel.
+        if !self.shelf_trash
+            && self.bin_panel_height == 0.0
+            && !self.shelf_haul_armed
+            && self.trash_reveal == 0.0
+        {
+            Area::new(Id::new("fab-corbeille"))
+                .anchor(Align2::RIGHT_BOTTOM, vec2(-18.0, -16.0))
+                .order(Order::Foreground)
+                .show(ctx, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
+                    ui.with_layout(Layout::top_down(Align::Center), |ui| {
+                        let n = self.lib.index.trash.len() + self.shelf_toss.len();
+                        let resp = self
+                            .wastebasket(ui, n)
+                            .on_hover_text("Trash");
+                        if resp.clicked() && !self.shelf_fed {
+                            self.shelf_trash = !self.shelf_trash;
                             self.shelf_sel.clear();
-                            self.shelf_fed = true;
+                            self.shelf_anchor = None;
+                            if let Scene::Shelf { query } = &mut self.scene {
+                                query.clear();
+                            }
                         }
-                    }
-                    let hungry = self.shelf_haul_armed
-                        && self
-                            .shelf_haul_now
-                            .is_some_and(|p| self.trash_rect.expand(18.0).contains(p));
-                    let resp = self
-                        .wastebasket(ui, self.bin_open(), n, hungry)
-                        .on_hover_text("Trash");
-                    if resp.clicked() && !self.shelf_fed && !self.shelf_haul_armed {
-                        self.shelf_trash = !self.shelf_trash;
-                        self.shelf_sel.clear();
-                        self.shelf_anchor = None;
-                        if let Scene::Shelf { query } = &mut self.scene {
-                            query.clear();
-                        }
-                    }
+                    });
                 });
-            });
+        }
 
         Area::new(Id::new("shelf-search"))
             .anchor(Align2::CENTER_TOP, vec2(0.0, 16.0))
@@ -1499,8 +1513,9 @@ impl CahierApp {
     }
 
     fn shelf_keys(&mut self, ctx: &Context) {
-        let typing =
-            ctx.wants_keyboard_input() || self.rename_id.is_some() || self.emoji_pick.is_some();
+        let typing = ctx.wants_keyboard_input()
+            || self.rename_id.is_some()
+            || self.emoji_pick.is_some();
         let mut clear = false;
         let mut trash_sel = false;
         let mut select_all = false;
@@ -1534,12 +1549,13 @@ impl CahierApp {
         if clear {
             if self.spine_wheel.is_some() {
                 self.spine_wheel = None;
+            } else if self.shelf_trash {
+                self.close_bin(ctx);
             } else if !self.shelf_sel.is_empty() {
                 self.shelf_sel.clear();
                 self.shelf_anchor = None;
-            } else if self.shelf_trash {
-                self.shelf_trash = false;
             }
+            return;
         }
         if select_all {
             self.shelf_sel = self.lib.index.notes.iter().map(|m| m.id).collect();
@@ -1646,7 +1662,7 @@ impl CahierApp {
         };
         let screen = ctx.screen_rect();
         let chrome = pos.y < screen.min.y + 76.0 || pos.x < screen.min.x + 12.0;
-        let on_trash = self.trash_rect.expand(12.0).contains(pos);
+        let on_trash = self.over_trash_drop_zone(pos, screen, 12.0);
         let querying = matches!(&self.scene, Scene::Shelf { query } if !query.trim().is_empty());
         let hit = self
             .shelf_slots
@@ -1676,6 +1692,17 @@ impl CahierApp {
                 self.shelf_haul_ids.clear();
                 self.shelf_drop = None;
             }
+            return;
+        }
+
+        // The drawer grip owns its gesture, never a notebook drag or a selection band.
+        if self.bin_handle_drag.is_some()
+            || (pressed && self.bin_handle_rect.contains(pos) && self.shelf_haul.is_none())
+            || (!self.shelf_trash
+                && self.bin_panel_height > 0.0
+                && pos.y >= screen.bottom() - self.bin_panel_height)
+        {
+            self.shelf_fed = true;
             return;
         }
 
@@ -1786,9 +1813,10 @@ impl CahierApp {
         if released {
             self.shelf_hold_t0 = None;
             if self.shelf_haul_armed {
-                let over = self
-                    .shelf_haul_now
-                    .is_some_and(|p| self.trash_rect.expand(22.0).contains(p));
+                let over = !self.shelf_trash
+                    && self
+                        .shelf_haul_now
+                        .is_some_and(|p| self.over_trash_drop_zone(p, screen, 22.0));
                 let from_bin = self.haul_from_bin();
                 if over && !from_bin {
                     self.begin_toss(ctx.input(|i| i.time));
@@ -1855,6 +1883,9 @@ impl CahierApp {
         // Bin cells are drop targets only while the bin row is deliberately open.
         // With the bin closed, shelf → trash goes through the wastebasket logo.
         let bin_ok = self.shelf_trash;
+        if bin_ok && (self.trash_rect.contains(pos) || self.bin_handle_rect.contains(pos)) {
+            return None;
+        }
         if bin_ok {
             if let Some(i) = self.trash_grid.iter().position(|r| r.contains(pos)) {
                 return Some(ShelfDrop::Bin(i));
@@ -1864,12 +1895,16 @@ impl CahierApp {
             return Some(ShelfDrop::Shelf(i));
         }
         let bin_near = if bin_ok {
-            self.trash_grid.iter().enumerate().min_by(|(_, a), (_, b)| {
-                a.center()
-                    .distance_sq(pos)
-                    .partial_cmp(&b.center().distance_sq(pos))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            self.trash_grid
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.is_positive())
+                .min_by(|(_, a), (_, b)| {
+                    a.center()
+                        .distance_sq(pos)
+                        .partial_cmp(&b.center().distance_sq(pos))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
         } else {
             None
         };
@@ -1918,10 +1953,9 @@ impl CahierApp {
             return;
         }
         let now = ctx.input(|i| i.time);
-        let dur = 0.46;
         let mut done = Vec::new();
         self.shelf_toss.retain(|t| {
-            if now - t.t0 - t.delay >= dur {
+            if now - t.t0 - t.delay >= TOSS_DURATION {
                 done.push(t.id);
                 false
             } else {
@@ -1934,28 +1968,38 @@ impl CahierApp {
         ctx.request_repaint();
     }
 
-    fn wastebasket(&mut self, ui: &mut Ui, open: bool, count: usize, hungry: bool) -> Response {
+    fn wastebasket(&mut self, ui: &mut Ui, count: usize) -> Response {
         let hit = 62.0;
         let (rect, resp) = ui.allocate_exact_size(vec2(hit, hit), Sense::click());
+        resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Trash"));
         self.trash_rect = rect;
         let id = Id::new("waste-basket");
         let hover_t = ui.ctx().animate_bool_with_time(
             id.with("h"),
-            resp.hovered() || hungry || open || count > 0,
+            resp.hovered() || resp.has_focus(),
             0.16,
         );
         let e = hover_t * hover_t * (3.0 - 2.0 * hover_t);
-        let side = 52.0 + e * 3.0;
-        let icon = Rect::from_center_size(rect.center() + vec2(0.0, 2.0 - e), vec2(side, side));
-        self.trash_mouth = pos2(icon.center().x, icon.min.y + side * 0.20);
-        let ctx = ui.ctx().clone();
-        let p = ui.painter().clone();
-        self.paint_emoji(&ctx, &p, icon, "🗑️");
-        resp.on_hover_cursor(if hungry {
-            CursorIcon::Move
-        } else {
-            CursorIcon::PointingHand
-        })
+        let press = if resp.is_pointer_button_down_on() { 0.95 } else { 1.0 };
+        let scale = (0.48 + 0.025 * e) * press;
+        let center = rect.center();
+        self.trash_mouth = center - vec2(0.0, 25.0 * scale);
+        self.paint_minimalist_bin(
+            ui.painter(),
+            center,
+            scale,
+            e,
+            self.look.paper.gamma_multiply(if count > 0 { 0.9 } else { 0.65 } + 0.1 * e),
+        );
+        if resp.has_focus() {
+            ui.painter().rect_stroke(
+                rect.shrink(2.0),
+                CornerRadius::same(12),
+                Stroke::new(1.5, self.look.paper),
+                StrokeKind::Inside,
+            );
+        }
+        resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
     fn paper_tex(&mut self, ctx: &Context) -> TextureHandle {
@@ -2008,7 +2052,6 @@ impl CahierApp {
         };
         let cloth = fade(self.look.cloth_at(cover));
         let cloth_deep = fade(shade_rgb(self.look.cloth_at(cover), 0.70));
-        let paper = fade(self.look.paper);
         painter.rect_filled(
             face.translate(vec2(2.0 * scale, 3.0 * scale)),
             CornerRadius::same(8),
@@ -2042,7 +2085,6 @@ impl CahierApp {
                 fade(self.look.paper.gamma_multiply(0.55)),
             );
         }
-        let _ = paper;
     }
 
     fn shelf_rename_field(&mut self, ctx: &Context) {
@@ -2142,20 +2184,19 @@ impl CahierApp {
             }
         }
         let mouth = self.trash_mouth;
-        let dur = 0.46;
         for t in &self.shelf_toss {
-            let u = ((now - t.t0 - t.delay) / dur).clamp(0.0, 1.0) as f32;
+            let u = ((now - t.t0 - t.delay) / TOSS_DURATION).clamp(0.0, 1.0) as f32;
             if now - t.t0 < t.delay {
                 ghosts.push((t.from, 0.88, 1.0, t.cover, t.emoji.clone()));
                 continue;
             }
-            let s = u * u;
-            let p = t.from.lerp(mouth, s);
-            let dip = (s * std::f32::consts::PI).sin() * 36.0 * (1.0 - s);
+            let s = u * u * (3.0 - 2.0 * u);
+            let p = t.from.lerp(mouth + vec2(0.0, 26.0), s);
+            let lift = (u * std::f32::consts::PI).sin() * 24.0;
             ghosts.push((
-                p + vec2(0.0, dip),
-                0.88 * (1.0 - 0.78 * s),
-                1.0 - 0.55 * s,
+                p - vec2(0.0, lift),
+                0.88 * (1.0 - s),
+                1.0 - s,
                 t.cover,
                 t.emoji.clone(),
             ));
@@ -2173,26 +2214,6 @@ impl CahierApp {
                     self.paint_dos_at(ctx, &painter, c, sc, a, cover, &em);
                 }
             });
-    }
-
-    /// Sits on the wastebasket while the bin row is open.
-    fn empty_bin_pull(&self, ui: &mut Ui) -> Response {
-        let (rect, resp) = ui.allocate_exact_size(vec2(96.0, 40.0), Sense::click());
-        let fill = if resp.hovered() {
-            shade_rgb(self.look.rust(), 1.12)
-        } else {
-            self.look.rust()
-        };
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(18), fill);
-        ui.painter().text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            "Empty",
-            self.look.mono(15.0),
-            well_glyph(fill, self.look.paper, self.look.ink),
-        );
-        resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
     /// Same well as New, with a question mark in the center.
@@ -2598,11 +2619,45 @@ impl CahierApp {
         self.shelf_trash
     }
 
+    fn bin_drop_active(&self) -> bool {
+        !self.shelf_trash && (self.shelf_haul_armed || !self.shelf_toss.is_empty())
+    }
+
+    fn over_trash_drop_zone(&self, pos: Pos2, screen: Rect, margin: f32) -> bool {
+        if !self.bin_drop_active() {
+            return self.trash_rect.expand(margin).contains(pos);
+        }
+        let dx = screen.right() - pos.x;
+        let dy = screen.bottom() - pos.y;
+        let radius = BIN_DROP_RADIUS * self.trash_reveal + margin;
+        dx >= -margin && dy >= -margin && dx * dx + dy * dy <= radius * radius
+    }
+
     fn shelf_slot() -> Vec2 {
         vec2(
             DOS_W + DOS_PAD * 2.0,
             DOS_PAD + PAPER_PEEK + DOS_H + TITLE_ROW,
         )
+    }
+
+    fn close_bin(&mut self, ctx: &Context) {
+        self.shelf_trash = false;
+        self.bin_handle_drag = None;
+        self.shelf_sel.clear();
+        self.shelf_anchor = None;
+        self.shelf_band = None;
+        self.shelf_band_now = None;
+        self.shelf_band_armed = false;
+        self.shelf_haul = None;
+        self.shelf_haul_now = None;
+        self.shelf_haul_armed = false;
+        self.shelf_haul_ids.clear();
+        self.shelf_hold_t0 = None;
+        self.shelf_drop = None;
+        self.shelf_slots.retain(|(id, _)| !self.lib.is_trashed(*id));
+        self.shelf_fed = true;
+        ctx.memory_mut(|m| m.surrender_focus(Id::new("bin-drawer-handle")));
+        ctx.request_repaint();
     }
 
     fn ui_bin_zone(
@@ -2615,25 +2670,64 @@ impl CahierApp {
     ) {
         let slot = Self::shelf_slot();
         let h = slot.y + 20.0;
+        let drag = self
+            .bin_handle_drag
+            .zip(ctx.input(|i| i.pointer.interact_pos()));
+        if let Some(((origin, height), pos)) = drag {
+            self.bin_panel_height = (height - (pos.y - origin.y).max(0.0)).clamp(28.0, h);
+        } else {
+            let target = if self.shelf_trash { h } else { 0.0 };
+            let dt = ctx.input(|i| i.stable_dt).min(0.05);
+            self.bin_panel_height += (target - self.bin_panel_height) * (1.0 - (-24.0 * dt).exp());
+            if (target - self.bin_panel_height).abs() < 0.5 {
+                self.bin_panel_height = target;
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if self.bin_panel_height == 0.0 {
+            self.bin_handle_rect = Rect::NOTHING;
+            return;
+        }
         let rust = self.look.rust();
         let fill = mix_col(
             self.look.desk,
             rust,
             if self.look.dark { 0.34 } else { 0.22 },
         );
+        let mut seam = Pos2::ZERO;
+        let slot_start = self.shelf_slots.len();
         TopBottomPanel::bottom("bin-zone")
-            .exact_height(h)
+            .exact_height(self.bin_panel_height)
             .show_separator_line(false)
             .frame(Frame::NONE.fill(fill))
             .show(ctx, |ui| {
                 let shifting = self.shelf_haul_armed;
+                let viewport = ui.max_rect();
+                seam = viewport.center_top();
+                // Slide full-size contents below the window edge instead of squeezing them.
+                let panel = Rect::from_min_size(viewport.min, vec2(viewport.width(), h));
+                let mut content = ui.new_child(UiBuilder::new().max_rect(panel));
+                content.set_clip_rect(viewport);
+                if !self.shelf_trash || self.bin_handle_drag.is_some() {
+                    let opacity = content.painter().opacity();
+                    content.disable();
+                    content.set_opacity(opacity);
+                }
+                let ui = &mut content;
+                let rail = Rect::from_min_max(
+                    pos2((panel.max.x - 180.0).max(panel.min.x), panel.min.y),
+                    panel.max,
+                );
+                self.trash_rect = rail;
+                let grid_rect = Rect::from_min_max(
+                    panel.min + vec2(0.0, 8.0),
+                    pos2(rail.min.x - 12.0, panel.max.y),
+                );
                 let left = 28.0;
                 let pitch = vec2(slot.x + SHELF_GAP, slot.y + SHELF_GAP);
                 let cols = TRASH_SLOTS as usize;
                 let grid = vec2(left + cols as f32 * pitch.x, slot.y);
-                ui.add_space(8.0);
-                let (full, _) = ui.allocate_exact_size(grid, Sense::hover());
-                let origin = pos2(full.min.x + left, full.min.y);
                 let occ: HashMap<u32, crate::library::NoteMeta> = self
                     .lib
                     .index
@@ -2642,34 +2736,300 @@ impl CahierApp {
                     .filter(|m| !self.shelf_toss.iter().any(|t| t.id == m.id))
                     .map(|m| (m.slot, m.clone()))
                     .collect();
-                for idx in 0..cols {
-                    let cell = Rect::from_min_size(
-                        origin + vec2(idx as f32 * pitch.x, 0.0),
-                        slot,
-                    );
-                    self.trash_grid.push(cell);
-                    let meta = occ.get(&(idx as u32)).cloned();
-                    let lifted = meta
-                        .as_ref()
-                        .map(|m| shifting && self.shelf_haul_ids.contains(&m.id))
-                        .unwrap_or(false);
-                    let hot = shifting && self.shelf_drop == Some(ShelfDrop::Bin(idx));
-                    if let Some(meta) = meta.filter(|_| !lifted) {
-                        ui.scope_builder(UiBuilder::new().max_rect(cell), |ui| {
-                            let selected = self.shelf_sel.contains(&meta.id);
-                            match self.cahier_dos(ui, &meta, selected, true) {
-                                Some(DosAct::Open) => *open = Some(meta.id),
-                                Some(DosAct::Select) => *select = Some(meta.id),
-                                Some(DosAct::Toggle) => *toggle = Some(meta.id),
-                                Some(DosAct::Range) => *range = Some(meta.id),
-                                None => {}
+                ui.scope_builder(UiBuilder::new().max_rect(grid_rect), |ui| {
+                    ui.set_clip_rect(grid_rect.intersect(viewport));
+                    ScrollArea::horizontal()
+                        .id_salt("trash-grid")
+                        .scroll_source(ScrollSource {
+                            drag: false,
+                            scroll_bar: true,
+                            mouse_wheel: true,
+                        })
+                        .show(ui, |ui| {
+                            let (full, _) = ui.allocate_exact_size(grid, Sense::hover());
+                            let origin = pos2(full.min.x + left, full.min.y);
+                            for idx in 0..cols {
+                                let cell = Rect::from_min_size(
+                                    origin + vec2(idx as f32 * pitch.x, 0.0),
+                                    slot,
+                                );
+                                self.trash_grid.push(cell.intersect(ui.clip_rect()));
+                                let meta = occ.get(&(idx as u32)).cloned();
+                                let lifted = meta
+                                    .as_ref()
+                                    .map(|m| shifting && self.shelf_haul_ids.contains(&m.id))
+                                    .unwrap_or(false);
+                                let hot = shifting && self.shelf_drop == Some(ShelfDrop::Bin(idx));
+                                if let Some(meta) = meta.filter(|_| !lifted) {
+                                    ui.scope_builder(UiBuilder::new().max_rect(cell), |ui| {
+                                        let selected = self.shelf_sel.contains(&meta.id);
+                                        match self.cahier_dos(ui, &meta, selected, true) {
+                                            Some(DosAct::Open) => *open = Some(meta.id),
+                                            Some(DosAct::Select) => *select = Some(meta.id),
+                                            Some(DosAct::Toggle) => *toggle = Some(meta.id),
+                                            Some(DosAct::Range) => *range = Some(meta.id),
+                                            None => {}
+                                        }
+                                    });
+                                } else {
+                                    self.place_dos(ui, cell, hot);
+                                }
                             }
                         });
-                    } else if shifting {
-                        self.place_dos(ui, cell, hot);
-                    }
+                });
+                self.ui_empty_bin(ui, rail);
+            });
+        if !self.shelf_trash || self.bin_handle_drag.is_some() {
+            self.shelf_slots.truncate(slot_start);
+        }
+        self.ui_bin_handle(ctx, seam, fill);
+    }
+
+    fn ui_bin_handle(&mut self, ctx: &Context, seam: Pos2, fill: Color32) {
+        let cancelled = ctx.input(|i| {
+            !i.focused
+                || i.multi_touch().is_some_and(|mt| mt.num_touches >= 2)
+                || i.events.iter().any(|e| {
+                    matches!(e, Event::Touch { phase: TouchPhase::Cancel, .. })
+                })
+        });
+        if cancelled {
+            if self.bin_handle_drag.take().is_some() {
+                ctx.request_repaint();
+            }
+        }
+        Area::new(Id::new("bin-drawer-grip"))
+            .order(Order::Foreground)
+            .movable(false)
+            .constrain(false)
+            .fixed_pos(seam - vec2(100.0, 24.0))
+            .show(ctx, |ui| {
+                if !self.shelf_trash
+                    || self.shelf_haul.is_some()
+                    || self.shelf_haul_armed
+                    || cancelled
+                {
+                    ui.disable();
+                }
+                let (hit, _) = ui.allocate_exact_size(vec2(200.0, 48.0), Sense::hover());
+                self.bin_handle_rect = hit;
+                let resp = ui.interact(hit, Id::new("bin-drawer-handle"), Sense::click_and_drag());
+                resp.widget_info(|| {
+                    WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Close trash")
+                });
+                let (pressed, down, released, origin, pos) = ctx.input(|i| {
+                    (
+                        i.pointer.primary_pressed(),
+                        i.pointer.primary_down(),
+                        i.pointer.primary_released(),
+                        i.pointer.press_origin(),
+                        i.pointer.interact_pos(),
+                    )
+                });
+                if pressed && resp.is_pointer_button_down_on() && ui.is_enabled() {
+                    self.bin_handle_drag = origin.map(|pos| (pos, self.bin_panel_height));
+                }
+                let pulled = self.bin_handle_drag.zip(pos).is_some_and(|((start, _), end)| {
+                    let delta = end - start;
+                    delta.y >= 48.0 && delta.y > delta.x.abs()
+                });
+                // A cancelled touch must not become a click when its last finger lifts.
+                let click = resp.clicked() && (!released || self.bin_handle_drag.is_some());
+                let close = ui.is_enabled() && (click || (released && pulled));
+                if (released || !down) && self.bin_handle_drag.take().is_some() {
+                    ctx.request_repaint();
+                }
+                let active = resp.hovered() || resp.has_focus() || self.bin_handle_drag.is_some();
+                let hover = ctx.animate_bool_with_time(resp.id.with("hover"), active, 0.12);
+                let tab = Rect::from_center_size(hit.center(), vec2(104.0, 28.0));
+                ui.painter().rect_filled(
+                    tab,
+                    CornerRadius::same(14),
+                    mix_col(fill, self.look.paper, 0.07 * hover),
+                );
+                if resp.has_focus() {
+                    ui.painter().rect_stroke(
+                        tab.expand(3.0),
+                        CornerRadius::same(17),
+                        Stroke::new(1.5, self.look.paper),
+                        StrokeKind::Inside,
+                    );
+                }
+                let c = tab.center() + vec2(0.0, if down && active { 2.0 } else { 0.0 });
+                ui.painter().add(Shape::line(
+                    vec![
+                        c + vec2(-12.0, -3.0),
+                        c + vec2(0.0, 3.0),
+                        c + vec2(12.0, -3.0),
+                    ],
+                    Stroke::new(2.5, self.look.paper.gamma_multiply(0.65 + 0.3 * hover)),
+                ));
+                resp.on_hover_cursor(if self.bin_handle_drag.is_some() {
+                    CursorIcon::Grabbing
+                } else {
+                    CursorIcon::PointingHand
+                })
+                .on_hover_text("Close trash · Esc\nDrag down to close");
+                if close {
+                    self.close_bin(ctx);
                 }
             });
+    }
+
+    fn ui_empty_bin(&mut self, ui: &mut Ui, rail: Rect) {
+        let empty = self.lib.index.trash.is_empty();
+        // Center the whole icon-and-label group, with its hit area inside the rail.
+        let center = rail.center() - vec2(0.0, 18.0);
+        let hit = Rect::from_center_size(rail.center(), vec2(156.0, 180.0)).intersect(rail);
+        ui.scope_builder(UiBuilder::new().max_rect(hit), |ui| {
+            if empty || self.shelf_haul_armed {
+                ui.disable();
+            }
+            let resp = ui.interact(hit, Id::new("empty-trash"), Sense::click());
+            resp.widget_info(|| {
+                WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Empty trash")
+            });
+            let hover = ui.ctx().animate_bool_with_time(
+                Id::new("empty-trash-hover"),
+                ui.is_enabled() && (resp.hovered() || resp.has_focus()),
+                0.16,
+            );
+            let e = hover * hover * (3.0 - 2.0 * hover);
+            let color = self.look.paper.gamma_multiply(if empty { 0.38 } else { 0.9 });
+            let press = if resp.is_pointer_button_down_on() {
+                0.95
+            } else {
+                1.0
+            };
+            self.paint_minimalist_bin(
+                ui.painter(),
+                center,
+                (1.25 + 0.06 * e) * press,
+                e,
+                color,
+            );
+            ui.painter().text(
+                center + vec2(0.0, 80.0),
+                Align2::CENTER_CENTER,
+                if empty { "Trash is empty" } else { "Empty trash" },
+                self.look.mono(14.0),
+                color,
+            );
+            if resp
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text("Permanently delete all notebooks in the trash")
+                .clicked()
+            {
+                self.lib.empty_trash();
+                self.shelf_sel.clear();
+                self.shelf_anchor = None;
+                self.shelf_fed = true;
+            }
+        });
+    }
+
+    fn paint_trash_drop_zone(&mut self, ctx: &Context) {
+        let screen = ctx.screen_rect();
+        let active = self.bin_drop_active();
+        let opening = ctx.animate_bool_with_time(
+            Id::new("bin-drop-zone-open"),
+            active,
+            0.22,
+        );
+        let e = opening * opening * (3.0 - 2.0 * opening);
+        self.trash_reveal = e;
+        if self.bin_open() || e <= 0.0 {
+            return;
+        }
+        let radius = BIN_DROP_RADIUS * e;
+        let corner = pos2(screen.right(), screen.bottom());
+        let offset = radius * QUARTER_DISK_CENTROID;
+        let center = corner - vec2(offset, offset);
+        let accepting = self.shelf_haul_armed
+            && !self.haul_from_bin()
+            && self
+                .shelf_haul_now
+                .is_some_and(|pos| self.over_trash_drop_zone(pos, screen, 0.0));
+        let hover = ctx.animate_bool_with_time(
+            Id::new("bin-drop-hover"),
+            accepting || !self.shelf_toss.is_empty(),
+            0.18,
+        );
+        let hover = hover * hover * (3.0 - 2.0 * hover);
+        let now = ctx.input(|i| i.time);
+        let bounce = self
+            .shelf_toss
+            .iter()
+            .map(|t| {
+                let u = ((now - t.t0 - t.delay) / TOSS_DURATION).clamp(0.0, 1.0) as f32;
+                (u * std::f32::consts::PI).sin()
+            })
+            .fold(0.0_f32, f32::max);
+        let scale = (0.75 + 0.33 * hover + 0.04 * bounce) * (0.78 + 0.22 * e);
+        self.trash_rect = Rect::from_min_max(corner - vec2(radius, radius), corner);
+        self.trash_mouth = pos2(center.x, center.y - 24.0 * scale);
+        let rust = self.look.rust();
+        let fill = mix_col(
+            self.look.desk,
+            rust,
+            if self.look.dark { 0.34 } else { 0.22 },
+        )
+        .gamma_multiply(e);
+        // Keep the sector below the dragged notebook and its toss animation.
+        let painter = ctx.layer_painter(LayerId::new(Order::Middle, Id::new("bin-drop-zone")));
+        let mut arc = Vec::with_capacity(25);
+        for i in 0..=24 {
+            let angle = std::f32::consts::FRAC_PI_2 * (1.0 - i as f32 / 24.0);
+            arc.push(corner - vec2(radius * angle.cos(), radius * angle.sin()));
+        }
+        let mut wedge = vec![corner];
+        wedge.extend(arc.iter().copied());
+        painter.add(Shape::convex_polygon(wedge, fill, Stroke::NONE));
+        if e > 0.02 {
+            painter.add(Shape::line(
+                arc,
+                Stroke::new(1.2, shade_rgb(rust, 1.18).gamma_multiply(0.48 * e)),
+            ));
+        }
+        self.paint_minimalist_bin(
+            &painter,
+            center,
+            scale,
+            hover,
+            self.look.paper.gamma_multiply(0.9 * e),
+        );
+    }
+
+    fn paint_minimalist_bin(&self, p: &Painter, center: Pos2, scale: f32, e: f32, color: Color32) {
+        let body = |x: f32, y: f32| center + vec2(x, y) * scale;
+        let angle = -0.24 * e;
+        let lid = |x: f32, y: f32| {
+            let hinge = vec2(-45.0, -25.0);
+            let d = vec2(x, y) - hinge;
+            let rotated = vec2(
+                d.x * angle.cos() - d.y * angle.sin(),
+                d.x * angle.sin() + d.y * angle.cos(),
+            );
+            center + (hinge + rotated - vec2(0.0, 6.0 * e)) * scale
+        };
+        let stroke = Stroke::new(5.0, color);
+
+        // The lid lifts toward the incoming notebook.
+        p.line_segment([lid(-45.0, -25.0), lid(45.0, -25.0)], stroke);
+        p.line_segment([lid(-14.0, -39.0), lid(14.0, -39.0)], stroke);
+        p.line_segment([lid(-14.0, -39.0), lid(-14.0, -31.0)], stroke);
+        p.line_segment([lid(14.0, -39.0), lid(14.0, -31.0)], stroke);
+
+        // Slightly tapered bin body with three simple ribs.
+        p.line_segment([body(-36.0, -21.0), body(-28.0, 39.0)], stroke);
+        p.line_segment([body(36.0, -21.0), body(28.0, 39.0)], stroke);
+        p.line_segment([body(-28.0, 39.0), body(28.0, 39.0)], stroke);
+        for x in [-14.0, 0.0, 14.0] {
+            p.line_segment(
+                [body(x, -12.0), body(x, 28.0)],
+                Stroke::new(4.0, color),
+            );
+        }
     }
 
     fn paint_sel_wash(&self, p: &Painter, rect: Rect, strong: bool) {
@@ -4239,27 +4599,8 @@ impl CahierApp {
     fn ui_canvas(&mut self, ui: &mut Ui) {
         let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let rect = resp.rect;
-        self.canvas_rect = rect;
-        if rect.width() > 10.0 {
-            let (pw, ph) = self
-                .note
-                .as_ref()
-                .map(|n| n.page_size())
-                .unwrap_or((PAGE_W, PAGE_H));
-            if let Some(page) = self.land_page.take() {
-                let n = self
-                    .note
-                    .as_ref()
-                    .map(|n| n.pages.len())
-                    .unwrap_or(1)
-                    .max(1);
-                let origin = self.origin_of(page.min(n - 1));
-                self.camera.show_writing(rect, origin, pw, ph);
-            } else if self.need_fit {
-                let page = self.page_in_view(rect);
-                self.camera.fit_page(rect, self.origin_of(page), pw, ph);
-                self.need_fit = false;
-            }
+        if !self.update_canvas_rect(rect) {
+            return;
         }
 
         self.handle_camera(ui, &resp, rect);
@@ -4271,7 +4612,57 @@ impl CahierApp {
         self.cursor_for_tool(ui, &resp);
     }
 
+    fn update_canvas_rect(&mut self, rect: Rect) -> bool {
+        if !Camera::valid_viewport(rect) {
+            return false;
+        }
+        let previous = self.canvas_rect;
+        let reference = if Camera::valid_viewport(previous) {
+            previous
+        } else {
+            rect
+        };
+        let (pw, ph) = self
+            .note
+            .as_ref()
+            .map(|n| n.page_size())
+            .unwrap_or((PAGE_W, PAGE_H));
+        if let Some(page) = self.land_page.take() {
+            let last = self
+                .note
+                .as_ref()
+                .map_or(0, |n| n.pages.len().saturating_sub(1));
+            self.camera
+                .show_writing(rect, self.origin_of(page.min(last)), pw, ph);
+            self.fitted_cell = None;
+            self.need_fit = false;
+        } else if self.need_fit {
+            let page = self.page_in_view(reference);
+            self.camera.fit_page(rect, self.origin_of(page), pw, ph);
+            self.fitted_cell = self.page_cells().get(page).copied();
+            self.need_fit = false;
+        } else if previous != rect {
+            let fitted = self.fitted_cell.map(|cell| {
+                let cells = self.page_cells();
+                let cell = if cells.contains(&cell) {
+                    cell
+                } else {
+                    cells
+                        .get(self.page_in_view(reference))
+                        .copied()
+                        .unwrap_or((0, 0))
+                };
+                self.fitted_cell = Some(cell);
+                (page_origin(cell.0, cell.1, pw, ph, self.gap()), vec2(pw, ph))
+            });
+            self.camera.resize_viewport(previous, rect, fitted);
+        }
+        self.canvas_rect = rect;
+        true
+    }
+
     fn handle_camera(&mut self, ui: &Ui, resp: &Response, rect: Rect) {
+        let before = self.camera;
         let space = ui.input(|i| i.key_down(Key::Space));
         let middle = ui.input(|i| i.pointer.middle_down());
         let pen = self.tablet.snapshot();
@@ -4361,6 +4752,9 @@ impl CahierApp {
             && resp.dragged()
         {
             self.camera.pan += resp.drag_delta();
+        }
+        if self.camera.pan != before.pan || self.camera.zoom != before.zoom {
+            self.fitted_cell = None;
         }
     }
 
@@ -4947,22 +5341,45 @@ impl CahierApp {
         };
         let cam = self.camera;
         let map = |p: Pos2| cam.to_screen(p, rect);
-        for (pi, page) in note.pages.iter().enumerate() {
-            let origin = page_origin(
-                page.col,
-                page.row,
-                note.page_w,
-                note.page_h,
-                note.sheet_join.gap(),
-            );
-            let min = map(Pos2::new(origin.x, origin.y));
-            let max = map(Pos2::new(origin.x + note.page_w, origin.y + note.page_h));
-            let paper = Rect::from_min_max(min, max);
-            let fused = note.sheet_join == SheetJoin::Linked && note.pages.len() > 1;
-            let n_left = fused && note.unit_occupied(page.col - 1, page.row);
-            let n_right = fused && note.unit_occupied(page.col + 1, page.row);
-            let n_top = fused && note.unit_occupied(page.col, page.row - 1);
-            let n_bot = fused && note.unit_occupied(page.col, page.row + 1);
+        let fused = note.sheet_join == SheetJoin::Linked
+            && note.pages.len() > 1
+            && !note.is_grown_single();
+        let min_col = note
+            .pages
+            .iter()
+            .map(|p| p.col)
+            .min()
+            .unwrap_or(0);
+        let fill = if note.paper == PaperKind::Slate {
+            self.look.desk_deep
+        } else {
+            self.look.paper
+        };
+        let bleed = 1.6;
+        let tiles: Vec<_> = note
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(pi, page)| {
+                let origin = page_origin(
+                    page.col,
+                    page.row,
+                    note.page_w,
+                    note.page_h,
+                    note.sheet_join.gap(),
+                );
+                let min = map(Pos2::new(origin.x, origin.y));
+                let max = map(Pos2::new(origin.x + note.page_w, origin.y + note.page_h));
+                let paper = Rect::from_min_max(min, max);
+                let n_left = fused && note.unit_occupied(page.col - 1, page.row);
+                let n_right = fused && note.unit_occupied(page.col + 1, page.row);
+                let n_top = fused && note.unit_occupied(page.col, page.row - 1);
+                let n_bot = fused && note.unit_occupied(page.col, page.row + 1);
+                (pi, page, origin, paper, n_left, n_right, n_top, n_bot)
+            })
+            .collect();
+
+        for &(_, _, _, paper, n_left, n_right, n_top, n_bot) in &tiles {
             let rad = 5;
             let sheet_r = if fused {
                 CornerRadius {
@@ -4987,14 +5404,38 @@ impl CahierApp {
                 paper.translate(vec2(3.0, 4.0))
             };
             painter.rect_filled(shadow, sheet_r, self.look.shadow);
-            let fill = if note.paper == PaperKind::Slate {
-                self.look.desk_deep
+        }
+
+        for &(pi, page, origin, paper, n_left, n_right, n_top, n_bot) in &tiles {
+            let rad = 5;
+            let sheet_r = if fused {
+                CornerRadius {
+                    nw: if n_left || n_top { 0 } else { rad },
+                    ne: if n_right || n_top { 0 } else { rad },
+                    sw: if n_left || n_bot { 0 } else { rad },
+                    se: if n_right || n_bot { 0 } else { rad },
+                }
             } else {
-                self.look.paper
+                CornerRadius::same(rad)
             };
-            painter.rect_filled(paper, sheet_r, fill);
-            self.paint_template(painter, paper, note.paper, cam.zoom);
-            if note.paper == PaperKind::Lined && !n_left {
+            let mut body = paper;
+            if fused {
+                if n_left {
+                    body.min.x -= bleed;
+                }
+                if n_right {
+                    body.max.x += bleed;
+                }
+                if n_top {
+                    body.min.y -= bleed;
+                }
+                if n_bot {
+                    body.max.y += bleed;
+                }
+            }
+            painter.rect_filled(body, sheet_r, fill);
+            self.paint_template(painter, paper, note.paper, cam, rect, fused);
+            if note.paper == PaperKind::Lined && page.col == min_col {
                 self.paint_punches(painter, paper, cam.zoom);
             }
             if note.paper != PaperKind::Slate
@@ -5050,13 +5491,15 @@ impl CahierApp {
                 painter.galley(pos, galley, tx.color32());
             }
 
-            painter.text(
-                pos2(paper.center().x, paper.max.y - 14.0 * cam.zoom.min(1.2)),
-                Align2::CENTER_BOTTOM,
-                format!("{}", pi + 1),
-                self.look.serif(12.0),
-                self.look.ink.gamma_multiply(0.38),
-            );
+            if !fused {
+                painter.text(
+                    pos2(paper.center().x, paper.max.y - 14.0 * cam.zoom.min(1.2)),
+                    Align2::CENTER_BOTTOM,
+                    format!("{}", pi + 1),
+                    self.look.serif(12.0),
+                    self.look.ink.gamma_multiply(0.38),
+                );
+            }
         }
 
         if let Some(pi) = self.live.as_ref().map(|(pi, _)| *pi) {
@@ -5258,19 +5701,36 @@ impl CahierApp {
         if !n.can_tear_unit() {
             return;
         }
+        let fused = n.sheet_join == SheetJoin::Linked && n.pages.len() > 1 && !n.is_grown_single();
         let hover = ui.input(|i| i.pointer.hover_pos());
         let z = self.camera.zoom;
         let rest = self.look.paper_rule_strong;
         let hot_c = self.look.rust();
         for (col, row, hit) in self.page_folds(canvas) {
-            let paper = self.unit_screen_rect(canvas, col, row);
             let hot = hover.is_some_and(|p| hit.contains(p));
+            let outer_ear = !n.unit_occupied(col + 1, row) && !n.unit_occupied(col, row - 1);
+            if fused && !outer_ear && !hot {
+                continue;
+            }
+            let paper = self.unit_screen_rect(canvas, col, row);
             paint_page_fold(painter, paper, z, if hot { hot_c } else { rest });
         }
     }
 
-    fn paint_template(&self, painter: &Painter, paper: Rect, kind: PaperKind, zoom: f32) {
-        let z = zoom;
+    fn paint_template(
+        &self,
+        painter: &Painter,
+        paper: Rect,
+        kind: PaperKind,
+        cam: Camera,
+        canvas: Rect,
+        fused: bool,
+    ) {
+        let z = cam.zoom;
+        if fused {
+            self.paint_template_world(painter, paper, kind, cam, canvas);
+            return;
+        }
         match kind {
             PaperKind::Blank | PaperKind::Slate => {}
             PaperKind::Lined => {
@@ -5374,6 +5834,140 @@ impl CahierApp {
                         Stroke::new(if i % 5 == 0 { 1.0 } else { 0.6 }, c),
                     );
                     x += 8.0 * z;
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    fn paint_template_world(
+        &self,
+        painter: &Painter,
+        clip: Rect,
+        kind: PaperKind,
+        cam: Camera,
+        canvas: Rect,
+    ) {
+        let z = cam.zoom;
+        let map = |p: Pos2| cam.to_screen(p, canvas);
+        let a = cam.to_paper(clip.min, canvas);
+        let b = cam.to_paper(clip.max, canvas);
+        let xmin = a.x.min(b.x);
+        let xmax = a.x.max(b.x);
+        let ymin = a.y.min(b.y);
+        let ymax = a.y.max(b.y);
+        match kind {
+            PaperKind::Blank | PaperKind::Slate => {}
+            PaperKind::Lined => {
+                let mut y = 88.0;
+                while y < ymax {
+                    if y > ymin {
+                        let s = map(Pos2::new(xmin, y));
+                        hline(painter, s.y, clip.min.x, clip.max.x, clip, Stroke::new(1.0, self.look.paper_rule));
+                    }
+                    y += 28.0;
+                }
+                let red = self.look.inks.get(2).copied().unwrap_or(self.look.ink);
+                let margin = Color32::from_rgb(
+                    (self.look.paper.r() as f32 * 0.62 + red.r() as f32 * 0.38) as u8,
+                    (self.look.paper.g() as f32 * 0.62 + red.g() as f32 * 0.38) as u8,
+                    (self.look.paper.b() as f32 * 0.62 + red.b() as f32 * 0.38) as u8,
+                );
+                let x = map(Pos2::new(64.0, 0.0)).x;
+                vline(
+                    painter,
+                    x,
+                    clip.min.y,
+                    clip.max.y,
+                    clip,
+                    Stroke::new(1.15, margin),
+                );
+            }
+            PaperKind::Grid => {
+                let mut x = (xmin / 24.0).floor() * 24.0;
+                while x <= xmax {
+                    let s = map(Pos2::new(x, 0.0)).x;
+                    vline(
+                        painter,
+                        s,
+                        clip.min.y,
+                        clip.max.y,
+                        clip,
+                        Stroke::new(0.8, self.look.paper_rule),
+                    );
+                    x += 24.0;
+                }
+                let mut y = (ymin / 24.0).floor() * 24.0;
+                while y <= ymax {
+                    let s = map(Pos2::new(0.0, y)).y;
+                    hline(
+                        painter,
+                        s,
+                        clip.min.x,
+                        clip.max.x,
+                        clip,
+                        Stroke::new(0.8, self.look.paper_rule),
+                    );
+                    y += 24.0;
+                }
+            }
+            PaperKind::Dots => {
+                let mut y = (ymin / 22.0).floor() * 22.0;
+                while y <= ymax {
+                    let mut x = (xmin / 22.0).floor() * 22.0;
+                    while x <= xmax {
+                        let p = map(Pos2::new(x, y));
+                        if clip.expand(2.0).contains(p) {
+                            painter.circle_filled(
+                                p,
+                                1.1 * z.max(0.6),
+                                self.look.paper_rule_strong,
+                            );
+                        }
+                        x += 22.0;
+                    }
+                    y += 22.0;
+                }
+            }
+            PaperKind::Millimetre => {
+                let mut y = (ymin / 8.0).floor() * 8.0;
+                let mut i = (y / 8.0).round() as i32;
+                while y <= ymax {
+                    let c = if i.rem_euclid(5) == 0 {
+                        self.look.paper_rule_strong
+                    } else {
+                        self.look.paper_rule
+                    };
+                    let s = map(Pos2::new(0.0, y)).y;
+                    hline(
+                        painter,
+                        s,
+                        clip.min.x,
+                        clip.max.x,
+                        clip,
+                        Stroke::new(if i.rem_euclid(5) == 0 { 1.0 } else { 0.6 }, c),
+                    );
+                    y += 8.0;
+                    i += 1;
+                }
+                let mut x = (xmin / 8.0).floor() * 8.0;
+                let mut i = (x / 8.0).round() as i32;
+                while x <= xmax {
+                    let c = if i.rem_euclid(5) == 0 {
+                        self.look.paper_rule_strong
+                    } else {
+                        self.look.paper_rule
+                    };
+                    let s = map(Pos2::new(x, 0.0)).x;
+                    vline(
+                        painter,
+                        s,
+                        clip.min.y,
+                        clip.max.y,
+                        clip,
+                        Stroke::new(if i.rem_euclid(5) == 0 { 1.0 } else { 0.6 }, c),
+                    );
+                    x += 8.0;
                     i += 1;
                 }
             }
@@ -5952,6 +6546,28 @@ fn sheet_tab_colors(desk: Color32) -> (Color32, Color32, Color32, Color32) {
     }
 }
 
+fn hline(p: &Painter, y: f32, x0: f32, x1: f32, clip: Rect, stroke: Stroke) {
+    if y < clip.min.y - 0.6 || y > clip.max.y + 0.6 {
+        return;
+    }
+    let lo = x0.max(clip.min.x);
+    let hi = x1.min(clip.max.x);
+    if hi > lo + 0.2 {
+        p.line_segment([pos2(lo, y), pos2(hi, y)], stroke);
+    }
+}
+
+fn vline(p: &Painter, x: f32, y0: f32, y1: f32, clip: Rect, stroke: Stroke) {
+    if x < clip.min.x - 0.6 || x > clip.max.x + 0.6 {
+        return;
+    }
+    let lo = y0.max(clip.min.y);
+    let hi = y1.min(clip.max.y);
+    if hi > lo + 0.2 {
+        p.line_segment([pos2(x, lo), pos2(x, hi)], stroke);
+    }
+}
+
 fn fold_hit_rect(paper: Rect, zoom: f32) -> Rect {
     let s = (24.0 * zoom).clamp(20.0, 52.0);
     Rect::from_min_max(
@@ -6111,5 +6727,3 @@ fn paint_paper_icon(p: &egui::Painter, c: Pos2, fg: Color32) {
         );
     }
 }
-
-

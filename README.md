@@ -26,6 +26,14 @@ Linked pages share one flush sheet; Separate keeps a gutter. Each free edge gets
 
 ## Run
 
+### Install (Arch Linux / Omarchy)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CloudDown/omacourses/main/install.sh | bash
+```
+
+The installer checks the Arch build dependencies, asks before installing any that are missing, builds the latest version from source, and puts `cahier` in `~/.local/bin`. It also supports other Linux distributions if Rust/Cargo and the required graphics development libraries are already installed.
+
 ```bash
 cargo run --release
 cahier --help
