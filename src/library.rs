@@ -135,31 +135,6 @@ impl Library {
         Some(note)
     }
 
-    /// Copies the notebook (JSON + media) onto a new id.
-    pub fn duplicate_note(&mut self, src: &Note) -> Option<Note> {
-        let mut copy = src.clone();
-        copy.id = Uuid::new_v4();
-        copy.title = if src.title.trim().is_empty() {
-            "Untitled copy".into()
-        } else {
-            format!("{} copy", src.title)
-        };
-        copy.created = Utc::now();
-        copy.touch();
-        copy.pinned = false;
-        let src_media = self.note_dir(src.id).join("media");
-        let dst_media = self.note_dir(copy.id).join("media");
-        let _ = fs::create_dir_all(&dst_media);
-        if let Ok(entries) = fs::read_dir(&src_media) {
-            for e in entries.flatten() {
-                let to = dst_media.join(e.file_name());
-                let _ = fs::copy(e.path(), to);
-            }
-        }
-        self.save_note(&copy);
-        Some(copy)
-    }
-
     pub fn save_note(&mut self, note: &Note) {
         let dir = self.note_dir(note.id);
         let _ = fs::create_dir_all(dir.join("media"));

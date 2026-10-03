@@ -121,18 +121,11 @@ struct SpineWheel {
 
 #[derive(Clone, Copy)]
 enum MoreAct {
-    Save,
-    Duplicate,
-    Pin,
     Linked,
     Separate,
-    RemovePage,
-    Png,
-    Pdf,
+    Download,
     Trash,
     Fit,
-    ZoomIn,
-    ZoomOut,
     Paper,
 }
 
@@ -213,6 +206,8 @@ pub struct CahierApp {
     pen_ui_grab: bool,
     /// Open the image picker outside the click (system portal).
     pending_image: Option<(usize, Pos2)>,
+    /// File format chooser shown after saving a note for download.
+    export_picker_open: bool,
     /// Explorer-style selection on the shelf.
     shelf_sel: Vec<Uuid>,
     shelf_anchor: Option<Uuid>,
@@ -342,6 +337,7 @@ impl CahierApp {
             palette_open: false,
             pen_ui_grab: false,
             pending_image: None,
+            export_picker_open: false,
             shelf_sel: Vec::new(),
             shelf_anchor: None,
             shelf_trash: false,
@@ -586,28 +582,9 @@ impl CahierApp {
         }
     }
 
-    fn duplicate_open_note(&mut self) {
-        let Some(n) = self.note.clone() else {
-            return;
-        };
-        self.lib.save_note(&n);
-        self.dirty = false;
-        if let Some(copy) = self.lib.duplicate_note(&n) {
-            self.open_note(copy.id);
-        }
-    }
-
-    fn toggle_pin_open(&mut self) {
-        let Some(n) = self.note.as_mut() else {
-            return;
-        };
-        n.pinned = !n.pinned;
-        let pinned = n.pinned;
-        let id = n.id;
-        self.mark_dirty();
-        if pinned {
-            self.lib.bring_front(id);
-        }
+    fn save_for_download(&mut self, ctx: &Context) {
+        self.save_now(ctx);
+        self.export_picker_open = self.note.is_some();
     }
 
     fn set_sheet_join(&mut self, join: SheetJoin) {
@@ -820,7 +797,8 @@ impl eframe::App for CahierApp {
         if let Some(toast) = &self.toast {
             if t < toast.until {
                 let msg = toast.msg.clone();
-                ShowToast { look: &self.look }.show(ctx, &msg);
+                let paper = self.paper_tex(ctx);
+                ShowToast { look: &self.look }.show(ctx, &msg, &paper);
             } else {
                 self.toast = None;
             }
@@ -858,22 +836,28 @@ struct ShowToast<'a> {
 }
 
 impl ShowToast<'_> {
-    fn show(&self, ctx: &Context, msg: &str) {
+    fn show(&self, ctx: &Context, msg: &str, paper: &TextureHandle) {
         Area::new(Id::new("toast"))
             .anchor(Align2::CENTER_TOP, vec2(0.0, 56.0))
             .show(ctx, |ui| {
-                Frame::NONE
+                let mut grain = None;
+                let card = Frame::NONE
                     .fill(self.look.paper)
-                    .corner_radius(3)
+                    .corner_radius(8)
                     .stroke(Stroke::new(1.0_f32, self.look.ink.gamma_multiply(0.18)))
+                    .shadow(egui::epaint::Shadow { offset: [0, 4], blur: 8, spread: 0, color: self.look.shadow.gamma_multiply(0.42) })
                     .inner_margin(Margin::symmetric(16, 8))
                     .show(ui, |ui| {
+                        grain = Some(ui.painter().add(Shape::Noop));
                         ui.label(
                             RichText::new(msg)
-                                .font(self.look.serif(15.0))
+                                .font(self.look.mono(13.0))
                                 .color(self.look.ink),
                         );
                     });
+                if let Some(grain) = grain {
+                    ui.painter().set(grain, paper_grain(card.response.rect.shrink(1.0), 7, paper));
+                }
             });
     }
 }
@@ -1035,6 +1019,8 @@ impl CahierApp {
                     if Popup::is_any_open(ctx) {
                         Popup::close_all(ctx);
                         ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+                    } else if self.export_picker_open {
+                        self.export_picker_open = false;
                     } else if self.tin_open {
                         self.tin_open = false;
                     } else if self.palette_open {
@@ -1078,7 +1064,7 @@ impl CahierApp {
                 }
             }
             if save {
-                self.save_now(ctx);
+                self.save_for_download(ctx);
             }
             if export_png {
                 self.export_png(ctx);
@@ -2238,7 +2224,6 @@ impl CahierApp {
     fn help_signet(&self, ui: &mut Ui, open: bool) -> Response {
         let size = 56.0;
         let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
-        let c = rect.center();
         let p = ui.painter();
         let paper = mix_col(self.look.paper, self.look.accent, 0.04);
         let well = if resp.hovered() || open {
@@ -2246,24 +2231,13 @@ impl CahierApp {
         } else {
             paper
         };
-        p.circle_filled(c, 25.0, well);
-        p.circle_stroke(
-            c,
-            25.0,
-            Stroke::new(1.2_f32, self.look.ink.gamma_multiply(0.22)),
-        );
-        p.circle_filled(c, 16.5, mix_col(well, self.look.paper, 0.35));
-        p.circle_stroke(
-            c,
-            16.5,
-            Stroke::new(1.0_f32, self.look.ink.gamma_multiply(0.16)),
-        );
+        let (face, fg) = self.paint_note_surface(ui, rect.shrink(3.0), &resp, well, 25);
         p.text(
-            c + vec2(0.0, 1.0),
+            face.center() + vec2(0.0, 1.0),
             Align2::CENTER_CENTER,
             "?",
             self.look.serif(22.0),
-            self.look.ink,
+            fg,
         );
         resp.on_hover_cursor(CursorIcon::PointingHand)
     }
@@ -2271,40 +2245,15 @@ impl CahierApp {
     fn quit_signet(&self, ui: &mut Ui) -> Response {
         let size = 56.0;
         let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
-        let c = rect.center();
         let p = ui.painter();
         let well = if resp.hovered() {
             self.look.desk_edge
         } else {
             self.look.desk_deep
         };
-        self.paint_inkwell_body(p, c, well);
-        let fg = well_glyph(well, self.look.paper, self.look.ink);
-        let s = 6.5;
-        p.line_segment(
-            [c + vec2(-s, -s), c + vec2(s, s)],
-            Stroke::new(1.8_f32, fg),
-        );
-        p.line_segment(
-            [c + vec2(s, -s), c + vec2(-s, s)],
-            Stroke::new(1.8_f32, fg),
-        );
+        let (face, fg) = self.paint_note_surface(ui, rect.shrink(3.0), &resp, well, 25);
+        paint_cross(p, face.center(), 6.5, fg);
         resp.on_hover_cursor(CursorIcon::PointingHand)
-    }
-
-    fn paint_inkwell_body(&self, p: &Painter, c: Pos2, well: Color32) {
-        p.circle_filled(c, 25.0, well);
-        p.circle_stroke(
-            c,
-            25.0,
-            Stroke::new(1.2_f32, self.look.muted.gamma_multiply(0.7)),
-        );
-        p.circle_filled(c, 16.5, shade_rgb(well, 0.72));
-        p.circle_stroke(
-            c,
-            16.5,
-            Stroke::new(1.0_f32, self.look.ink.gamma_multiply(0.35)),
-        );
     }
 
     /// Notebook sheet: the same object for the help card and the marks.
@@ -2823,26 +2772,12 @@ impl CahierApp {
             BIN_HOVER_DURATION,
         );
         let e = hover * hover * (3.0 - 2.0 * hover);
-        let color = self.look.paper.gamma_multiply(if ui.is_enabled() { 0.9 } else { 0.38 });
         let p = ui.painter();
-        p.rect_filled(
-            hit,
-            CornerRadius::same(12),
-            self.look.paper.gamma_multiply(0.035 + 0.055 * e),
-        );
-        p.rect_stroke(
-            hit,
-            CornerRadius::same(12),
-            Stroke::new(
-                if resp.has_focus() { 1.5 } else { 1.0 },
-                self.look.paper.gamma_multiply(if resp.has_focus() { 0.9 } else { 0.13 + 0.12 * e }),
-            ),
-            StrokeKind::Inside,
-        );
-        let shift = if resp.is_pointer_button_down_on() { 2.0 } else { 0.0 };
+        let fill = mix_col(self.look.paper, self.look.rust(), 0.56 - 0.08 * e);
+        let (face, color) = self.paint_note_surface(ui, hit.shrink(2.0), resp, fill, 12);
         let compact = hit.height() < 90.0;
-        let c = if compact { pos2(hit.left() + 23.0, hit.center().y + shift) }
-            else { hit.center() + vec2(0.0, -14.0 + shift) };
+        let c = if compact { pos2(hit.left() + 23.0, face.center().y) }
+            else { face.center() + vec2(0.0, -14.0) };
         if compact {
             p.text(pos2(hit.left() + 46.0, c.y), Align2::LEFT_CENTER, label, self.look.mono(10.5), color);
         } else {
@@ -3694,7 +3629,6 @@ impl CahierApp {
     fn inkwell(&self, ui: &mut Ui) -> Response {
         let size = 56.0;
         let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
-        let c = rect.center();
         let p = ui.painter();
         let g = self.look.green();
         let well = if resp.hovered() {
@@ -3702,8 +3636,8 @@ impl CahierApp {
         } else {
             g
         };
-        self.paint_inkwell_body(p, c, well);
-        paint_plus(p, c, well_glyph(well, self.look.paper, self.look.ink));
+        let (face, fg) = self.paint_note_surface(ui, rect.shrink(3.0), &resp, well, 25);
+        paint_plus(p, face.center(), fg);
         resp.on_hover_cursor(CursorIcon::PointingHand)
     }
 
@@ -3766,7 +3700,7 @@ impl CahierApp {
                     ui.add_space(8.0);
                     let te = TextEdit::singleline(&mut self.title_buf)
                         .font(self.look.serif(20.0))
-                        .desired_width((ui.available_width() - if compact { 128.0 } else { 410.0 }).clamp(48.0, 280.0))
+                        .desired_width((ui.available_width() - if compact { 128.0 } else { 322.0 }).clamp(48.0, 280.0))
                         .frame(false);
                     if ui.add(te).changed() {
                         if let Some(n) = &mut self.note {
@@ -3780,18 +3714,18 @@ impl CahierApp {
                         let more = self.round_well(ui, chrome, self.look.paper, paint_more);
                         more.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Notebook menu"));
                         ui.add_enabled_ui(self.note.as_ref().is_some_and(|n| n.can_tear_unit()), |ui| {
-                            let trash = self.round_well(ui, chrome, self.look.rust(), |p, c, fg| {
-                                self.paint_minimalist_bin(p, c, 0.25, 0.0, fg);
-                            });
-                            trash.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Delete pages"));
-                            if trash.clicked() { self.start_page_delete(); }
+                            let remove_page = self.round_well(
+                                ui, chrome, mix_col(self.look.paper, self.look.rust(), 0.56),
+                                paint_delete_page_icon,
+                            );
+                            remove_page.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Delete pages"));
+                            if remove_page.clicked() { self.start_page_delete(); }
                         });
                         let join = self
                             .note
                             .as_ref()
                             .map(|n| n.sheet_join)
                             .unwrap_or(SheetJoin::Linked);
-                        let pinned = self.note.as_ref().is_some_and(|n| n.pinned);
                         let mut act = None;
                         Popup::menu(&more).frame(self.note_popup_frame()).show(|ui| {
                             ui.set_width(312.0_f32.min(ctx.screen_rect().width() - 32.0).max(240.0));
@@ -3801,21 +3735,9 @@ impl CahierApp {
                                 .auto_shrink([false, true]).show(ui, |ui| {
                             if compact {
                                 if self.menu_row(ui, "Fit page", "0", false, false) { act = Some(MoreAct::Fit); }
-                                if self.menu_row(ui, "Zoom in", "+", false, false) { act = Some(MoreAct::ZoomIn); }
-                                if self.menu_row(ui, "Zoom out", "−", false, false) { act = Some(MoreAct::ZoomOut); }
                                 if self.menu_row(ui, "Paper", "M", false, false) { act = Some(MoreAct::Paper); }
                                 self.menu_sep(ui);
                             }
-                            if self.menu_row(ui, "Save", "Ctrl+S", false, false) {
-                                act = Some(MoreAct::Save);
-                            }
-                            if self.menu_row(ui, "Duplicate", "", false, false) {
-                                act = Some(MoreAct::Duplicate);
-                            }
-                            if self.menu_row(ui, "Pin", "", pinned, false) {
-                                act = Some(MoreAct::Pin);
-                            }
-                            self.menu_sep(ui);
                             if self.menu_row(
                                 ui,
                                 "Linked pages",
@@ -3835,17 +3757,8 @@ impl CahierApp {
                                 act = Some(MoreAct::Separate);
                             }
                             self.menu_sep(ui);
-                            ui.add_enabled_ui(self.note.as_ref().is_some_and(|n| n.can_tear_unit()), |ui| {
-                                if self.menu_row(ui, "Delete pages", "Ctrl+Shift+Del", false, true) {
-                                    act = Some(MoreAct::RemovePage);
-                                }
-                            });
-                            self.menu_sep(ui);
-                            if self.menu_row(ui, "PNG", "Ctrl+E", false, false) {
-                                act = Some(MoreAct::Png);
-                            }
-                            if self.menu_row(ui, "PDF", "Ctrl+Shift+E", false, false) {
-                                act = Some(MoreAct::Pdf);
+                            if self.menu_row(ui, "Download…", "Ctrl+S", false, false) {
+                                act = Some(MoreAct::Download);
                             }
                             self.menu_sep(ui);
                             if self.menu_row(ui, "Move to trash", "", false, true) {
@@ -3854,20 +3767,13 @@ impl CahierApp {
                             });
                         });
                         match act {
-                            Some(MoreAct::Save) => self.save_now(ctx),
-                            Some(MoreAct::Duplicate) => self.duplicate_open_note(),
-                            Some(MoreAct::Pin) => self.toggle_pin_open(),
                             Some(MoreAct::Linked) => self.set_sheet_join(SheetJoin::Linked),
                             Some(MoreAct::Separate) => {
                                 self.set_sheet_join(SheetJoin::Separate)
                             }
-                            Some(MoreAct::RemovePage) => self.start_page_delete(),
-                            Some(MoreAct::Png) => self.export_png(ctx),
-                            Some(MoreAct::Pdf) => self.export_pdf(ctx),
+                            Some(MoreAct::Download) => self.save_for_download(ctx),
                             Some(MoreAct::Trash) => self.trash_open_note(),
                             Some(MoreAct::Fit) => self.fit_to_screen(),
-                            Some(MoreAct::ZoomIn) => self.zoom_in(),
-                            Some(MoreAct::ZoomOut) => self.zoom_out(),
                             Some(MoreAct::Paper) => {
                                 if let Some(n) = &mut self.note { n.paper = n.paper.cycle(); self.mark_dirty(); }
                             }
@@ -3879,12 +3785,6 @@ impl CahierApp {
                             .clicked()
                         {
                             self.fit_to_screen();
-                        }
-                        if self
-                            .round_well(ui, chrome, mix_col(self.look.paper, self.look.accent, 0.28), paint_zoom_in)
-                            .clicked()
-                        {
-                            self.zoom_in();
                         }
                         {
                             let pct = format!("{}%", self.zoom_percent());
@@ -3905,12 +3805,6 @@ impl CahierApp {
                             {
                                 self.fit_to_screen();
                             }
-                        }
-                        if self
-                            .round_well(ui, chrome, mix_col(self.look.paper, self.look.accent, 0.28), paint_zoom_out)
-                            .clicked()
-                        {
-                            self.zoom_out();
                         }
                         let paper = self.round_well(ui, chrome, self.tool_well_fill(Tool::Highlighter, false), paint_paper_icon);
                         paper.widget_info(|| {
@@ -3943,6 +3837,65 @@ impl CahierApp {
         }
         if let Some((page, local)) = self.pending_image.take() {
             self.pick_image(page, local);
+        }
+        self.ui_export_format_picker(ctx);
+    }
+
+    fn ui_export_format_picker(&mut self, ctx: &Context) {
+        if !self.export_picker_open {
+            return;
+        }
+
+        let mut export_pdf = false;
+        let mut export_png = false;
+        let paper = self.paper_tex(ctx);
+        let response = Modal::new(Id::new("export-format-picker"))
+            .frame(self.note_popup_frame().fill(self.look.paper).corner_radius(12)
+                .stroke(Stroke::new(1.0, self.look.ink.gamma_multiply(0.18))))
+            .show(ctx, |ui| {
+                let grain = ui.painter().add(Shape::Noop);
+                ui.set_width((ctx.screen_rect().width() - 32.0).clamp(240.0, 360.0));
+                ui.vertical_centered(|ui| {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("Download your note")
+                            .font(self.look.serif(21.0))
+                            .color(self.look.ink),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new("Choose a file format")
+                            .font(self.look.mono(12.0))
+                            .color(self.look.ink.gamma_multiply(0.72)),
+                    );
+                    ui.add_space(12.0);
+                    let width = (ui.available_width() - 4.0).max(180.0);
+                    if self.note_action(ui, "PNG image", width, false).clicked() {
+                        export_png = true;
+                    }
+                    ui.add_space(4.0);
+                    if self.note_action(ui, "PDF document", width, false).clicked() {
+                        export_pdf = true;
+                    }
+                    ui.add_space(8.0);
+                    if self.note_action(ui, "Cancel", width, false).clicked() {
+                        self.export_picker_open = false;
+                    }
+                    ui.add_space(4.0);
+                });
+                ui.painter().set(grain, paper_grain(ui.min_rect().expand(7.0), 11, &paper));
+            });
+
+        if response.should_close() {
+            self.export_picker_open = false;
+        }
+        if export_png || export_pdf {
+            self.export_picker_open = false;
+            if export_png {
+                self.export_png(ctx);
+            } else {
+                self.export_pdf(ctx);
+            }
         }
     }
 
@@ -3994,7 +3947,12 @@ impl CahierApp {
                             ScrollArea::vertical().id_salt("dock-tools-vertical")
                                 .max_height((bounds.height() - 70.0).max(44.0)).max_width(44.0)
                                 .auto_shrink([true, true]).show(ui, |ui| {
-                                    self.dock_inner(ui, true);
+                                    // The scroll child otherwise inherits the whole window width,
+                                    // which shifts the centered tool wells away from their case.
+                                    ui.set_width(self.slot());
+                                    ui.with_layout(Layout::top_down(Align::Center), |ui| {
+                                        self.dock_inner(ui, true);
+                                    });
                                 });
                         });
                     } else {
@@ -4004,7 +3962,13 @@ impl CahierApp {
                             ScrollArea::horizontal().id_salt("dock-tools-horizontal")
                                 .max_width((bounds.width() - 70.0).max(44.0)).max_height(44.0)
                                 .auto_shrink([true, true]).show(ui, |ui| {
-                                    ui.horizontal(|ui| self.dock_inner(ui, false));
+                                    // Keep the horizontal scroller's cross-axis the size of one
+                                    // well. Its unconstrained child Ui would otherwise vertically
+                                    // center the row in the full available canvas.
+                                    ui.set_height(self.slot());
+                                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                        self.dock_inner(ui, false);
+                                    });
                                 });
                         });
                     }
@@ -4717,7 +4681,10 @@ impl CahierApp {
     }
 
     fn handle_camera(&mut self, ui: &Ui, resp: &Response, rect: Rect) {
-        if Popup::is_any_open(ui.ctx()) || ui.ctx().pointer_hover_pos().is_some_and(|p| Self::pen_over_chrome(ui.ctx(), p)) {
+        if self.export_picker_open
+            || Popup::is_any_open(ui.ctx())
+            || ui.ctx().pointer_hover_pos().is_some_and(|p| Self::pen_over_chrome(ui.ctx(), p))
+        {
             self.two_finger = None;
             return;
         }
@@ -4818,6 +4785,9 @@ impl CahierApp {
     }
 
     fn handle_tool(&mut self, ui: &Ui, resp: &Response, rect: Rect) {
+        if self.export_picker_open {
+            return;
+        }
         if self.tab_held {
             let down = ui.input(|i| i.pointer.primary_down()) || self.tablet.snapshot().down;
             self.tab_held = false;
@@ -4947,12 +4917,18 @@ impl CahierApp {
                 self.shape_still = Some(Instant::now());
                 self.shape_preview = None;
             }
-            let speed = self.speed(local);
+            let live_local = self
+                .live
+                .as_ref()
+                .map(|(start_page, _)| paper - self.origin_of(*start_page))
+                .unwrap_or(local);
+            let speed = self.speed(live_local);
             let hw = self.pressure.latest();
+            let linked = self.gap() == 0.0;
             if let Some((p, s)) = &mut self.live {
-                if *p == page {
+                if *p == page || linked {
                     let pr = mixed_pressure(s.nib, hw, speed);
-                    s.push(InkPoint::new(local, pr));
+                    s.push(InkPoint::new(live_local, pr));
                 }
             }
             let cam = self.camera;
@@ -4964,7 +4940,7 @@ impl CahierApp {
             if let Some((pgi, live)) = &mut self.live {
                 for sp in &extra {
                     let pp = cam.to_paper(*sp, rect);
-                    if page_at(pp, &cells, pw, ph, gap) == *pgi {
+                    if gap == 0.0 || page_at(pp, &cells, pw, ph, gap) == *pgi {
                         let (col, row) = cells.get(*pgi).copied().unwrap_or((0, 0));
                         let loc = pp - page_origin(col, row, pw, ph, gap);
                         live.push(InkPoint::new(
@@ -4974,7 +4950,7 @@ impl CahierApp {
                     }
                 }
             }
-            self.consider_shape(local);
+            self.consider_shape(live_local);
         }
         if self.live.is_some()
             && (primary_released || !primary_down)
@@ -5800,8 +5776,12 @@ impl CahierApp {
                 Stroke::new(if selected || resp.has_focus() { 3.0 } else { 1.0 }, color), StrokeKind::Inside);
             let badge = Rect::from_min_size(hit.min + vec2(8.0, 8.0), vec2(44.0, 44.0));
             let (face, fg) = self.paint_note_surface(ui, badge, &resp, if selected { color } else { self.look.paper }, 10);
-            painter.text(face.center(), Align2::CENTER_CENTER, if selected { "✓".to_owned() } else { (index + 1).to_string() },
-                self.look.mono(18.0), fg);
+            if selected {
+                paint_check(painter, face.center(), fg);
+            } else {
+                painter.text(face.center(), Align2::CENTER_CENTER, (index + 1).to_string(),
+                    self.look.mono(18.0), fg);
+            }
             if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                 toggle = Some((col, row));
             }
@@ -6745,12 +6725,35 @@ fn paint_more(p: &egui::Painter, c: Pos2, fg: Color32) {
     }
 }
 
+fn paper_grain(rect: Rect, radius: u8, paper: &TextureHandle) -> Shape {
+    egui::epaint::RectShape::filled(rect, radius, Color32::WHITE.gamma_multiply(0.20))
+        .with_texture(paper.id(), Rect::from_min_max(Pos2::ZERO,
+            pos2(rect.width() / PAPER_TILE, rect.height() / PAPER_TILE))).into()
+}
+
+fn paint_cross(p: &Painter, c: Pos2, arm: f32, fg: Color32) {
+    let st = Stroke::new(1.8, fg);
+    p.line_segment([c + vec2(-arm, -arm), c + vec2(arm, arm)], st);
+    p.line_segment([c + vec2(arm, -arm), c + vec2(-arm, arm)], st);
+}
+
+/// Rounded stationery outline, matching the paper control, with an inset cross.
+fn paint_delete_page_icon(p: &Painter, c: Pos2, fg: Color32) {
+    p.rect_stroke(
+        Rect::from_center_size(c, vec2(16.0, 20.0)),
+        4.0,
+        Stroke::new(1.8, fg),
+        StrokeKind::Inside,
+    );
+    paint_cross(p, c, 3.0, fg);
+}
+
 fn paint_back(p: &Painter, c: Pos2, fg: Color32) {
     // The shaft balances the chevron optically inside the circular face.
-    p.rect_filled(Rect::from_center_size(c + vec2(0.5, 0.0), vec2(17.0, 2.2)), 1.1, fg);
+    p.rect_filled(Rect::from_center_size(c + vec2(0.5, 0.0), vec2(17.0, 1.8)), 0.9, fg);
     p.add(Shape::line(
         vec![c + vec2(-1.0, -7.0), c + vec2(-8.0, 0.0), c + vec2(-1.0, 7.0)],
-        Stroke::new(2.2, fg),
+        Stroke::new(1.8, fg),
     ));
 }
 
@@ -6777,23 +6780,13 @@ fn paint_smile_icon(p: &Painter, c: Pos2, fg: Color32) {
 }
 
 fn paint_fit(p: &egui::Painter, c: Pos2, fg: Color32) {
-    let st = Stroke::new(2.0_f32, fg);
+    let st = Stroke::new(1.8_f32, fg);
     let s = 7.6;
     let m = 2.6;
-    p.line_segment([pos2(c.x - s, c.y - m), pos2(c.x - s, c.y - s)], st);
-    p.line_segment([pos2(c.x - s, c.y - s), pos2(c.x - m, c.y - s)], st);
-    p.line_segment([pos2(c.x + s, c.y - m), pos2(c.x + s, c.y - s)], st);
-    p.line_segment([pos2(c.x + s, c.y - s), pos2(c.x + m, c.y - s)], st);
-    p.line_segment([pos2(c.x - s, c.y + m), pos2(c.x - s, c.y + s)], st);
-    p.line_segment([pos2(c.x - s, c.y + s), pos2(c.x - m, c.y + s)], st);
-    p.line_segment([pos2(c.x + s, c.y + m), pos2(c.x + s, c.y + s)], st);
-    p.line_segment([pos2(c.x + s, c.y + s), pos2(c.x + m, c.y + s)], st);
-}
-
-fn paint_zoom_in(p: &egui::Painter, c: Pos2, fg: Color32) {
-    p.circle_stroke(c, 9.8, Stroke::new(1.95_f32, fg));
-    p.rect_filled(Rect::from_center_size(c, vec2(10.6, 2.4)), 1.2, fg);
-    p.rect_filled(Rect::from_center_size(c, vec2(2.4, 10.6)), 1.2, fg);
+    for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+        p.add(Shape::line(vec![c + vec2(x * s, y * m),
+            c + vec2(x * s, y * s), c + vec2(x * m, y * s)], st));
+    }
 }
 
 fn paint_curved_arrow(p: &egui::Painter, c: Pos2, fg: Color32, flip: f32) {
@@ -6806,7 +6799,7 @@ fn paint_curved_arrow(p: &egui::Painter, c: Pos2, fg: Color32, flip: f32) {
         let a = start + (end - start) * t;
         pts.push(pos2(c.x + flip * a.cos() * 8.1, c.y + a.sin() * 8.1 + 1.1));
     }
-    p.add(egui::Shape::line(pts.clone(), Stroke::new(2.1_f32, fg)));
+    p.add(egui::Shape::line(pts.clone(), Stroke::new(1.8_f32, fg)));
     if pts.len() >= 2 {
         let tip = pts[0];
         let nxt = pts[1];
@@ -6866,11 +6859,6 @@ fn paint_image_icon(p: &egui::Painter, c: Pos2, fg: Color32) {
         [pos2(c.x + 2.7, c.y + 1.45), pos2(fr.right() - 2.3, base)],
         hair,
     );
-}
-
-fn paint_zoom_out(p: &egui::Painter, c: Pos2, fg: Color32) {
-    p.circle_stroke(c, 9.8, Stroke::new(1.95_f32, fg));
-    p.rect_filled(Rect::from_center_size(c, vec2(10.6, 2.4)), 1.2, fg);
 }
 
 fn paint_paper_icon(p: &egui::Painter, c: Pos2, fg: Color32) {

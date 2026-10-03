@@ -509,10 +509,18 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
         matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Move to trash") && shape.clip_rect.contains(last)
     }), "all menu actions should fit in a normal window");
     frames.snapshot("notebook-menu");
-    let pin = frames.text_center("Pin");
-    frames.touch(app, TouchPhase::Start, pin);
-    frames.touch(app, TouchPhase::End, pin);
-    assert!(app.note.as_ref().unwrap().pinned);
+    let download = frames.text_center("Download…");
+    frames.touch(app, TouchPhase::Start, download);
+    frames.touch(app, TouchPhase::End, download);
+    frames.settle(app);
+    assert!(app.export_picker_open);
+    frames.text_center("PNG image");
+    frames.text_center("PDF document");
+    frames.snapshot("download-canson");
+    let cancel = frames.text_center("Cancel");
+    frames.drag(app, cancel, cancel);
+    frames.settle(app);
+    assert!(!app.export_picker_open);
     frames.drag(app, more, more);
     frames.settle(app);
     let separate = frames.text_center("Separate pages");
@@ -529,7 +537,7 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
     frames.settle(app);
     assert!(Popup::is_any_open(&frames.ctx));
     frames.snapshot("notebook-menu-short");
-    let save = frames.text_center("Save");
+    let save = frames.text_center("Download…");
     assert!(save.y > 0.0 && save.y < frames.size.y);
     let mut reached_last = false;
     for _ in 0..48 {
