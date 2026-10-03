@@ -6,43 +6,43 @@ The **shelf** holds your notebooks; each notebook opens onto a page with paper, 
 
 Your notes stay on your computer in `~/.local/share/omacourses`. Cahier needs no account or network connection.
 
-## Nouveautés
+## What's New
 
-### Plusieurs pages, deux façons de les lire
+### Multi-page notebooks, two ways to read them
 
-Ajoutez des pages autour de la feuille. Affichez-les bord à bord en mode *Linked*, ou gardez un espace entre elles en mode *Separate*.
-
-<p align="center">
-  <img src="docs/screens/liees.png" alt="Pages liées, bord à bord" width="49%">
-  <img src="docs/screens/separees.png" alt="Pages séparées par un espace" width="49%">
-</p>
-
-Les onglets `+` ajoutent une page sur un bord libre.
+Add pages around the current sheet. Display them edge to edge in *Linked* mode, or keep a gap between them in *Separate* mode.
 
 <p align="center">
-  <img src="docs/screens/onglets.png" alt="Onglets pour ajouter une page" width="80%">
+  <img src="docs/screens/liees.png" alt="Linked pages, joined edge to edge" width="49%">
+  <img src="docs/screens/separees.png" alt="Separate pages with a gap" width="49%">
 </p>
 
-### Du papier pour chaque idée
-
-Choisissez une feuille lignée, quadrillée, pointillée, millimétrée ou vierge. Le papier Canson apporte un grain discret aux notes et aux croquis.
+Use the `+` tabs to add a page along any free edge.
 
 <p align="center">
-  <img src="docs/screens/millimetre.png" alt="Papier millimétré et outils de dessin" width="80%">
+  <img src="docs/screens/onglets.png" alt="Tabs for adding a page" width="80%">
 </p>
 
-### Une étagère et une corbeille
+### Paper for every idea
 
-Retrouvez vos carnets sur l’étagère et restaurez ceux placés dans la corbeille.
+Choose lined, grid, dotted, graph, or blank paper. Canson paper adds a subtle texture to notes and sketches.
 
 <p align="center">
-  <img src="docs/screens/etagere.png" alt="Étagère des carnets" width="49%">
-  <img src="docs/screens/corbeille.png" alt="Carnets dans la corbeille" width="49%">
+  <img src="docs/screens/millimetre.png" alt="Graph paper and drawing tools" width="80%">
 </p>
 
-## Aperçu
+### A shelf and a bin
 
-![Page lignée avec outils de dessin](docs/screens/feuille.png)
+Keep your notebooks on the shelf and restore any you have moved to the bin.
+
+<p align="center">
+  <img src="docs/screens/etagere.png" alt="Notebook shelf" width="49%">
+  <img src="docs/screens/corbeille.png" alt="Notebooks in the bin" width="49%">
+</p>
+
+## Preview
+
+![Lined page with drawing tools](docs/screens/feuille.png)
 
 ## Run
 
