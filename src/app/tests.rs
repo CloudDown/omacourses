@@ -94,6 +94,17 @@ impl Frames {
         }
     }
 
+    fn text_center(&self, label: &str) -> Pos2 {
+        self.output.as_ref().unwrap().shapes.iter().find_map(|shape| {
+            if let Shape::Text(text) = &shape.shape {
+                if text.galley.text() == label {
+                    return Some(text.pos + text.galley.rect.center().to_vec2());
+                }
+            }
+            None
+        }).unwrap_or_else(|| panic!("visible label: {label}"))
+    }
+
     fn drag(&mut self, app: &mut CahierApp, from: Pos2, to: Pos2) {
         self.step(app, vec![Event::PointerMoved(from)]);
         self.step(
@@ -342,6 +353,438 @@ fn manual_scroll_leaves_fitted_mode() {
 }
 
 #[test]
+fn responsive_note_controls_do_not_overlap_through_resizes() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("A very long notebook title that must stay inside its header");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    for edge in [DockEdge::Bottom, DockEdge::Left, DockEdge::Top, DockEdge::Right] {
+        app.dock_edge = edge;
+        for size in [vec2(1280.0, 860.0), vec2(320.0, 280.0), vec2(360.0, 640.0),
+            vec2(1024.0, 320.0), vec2(760.0, 560.0), vec2(600.0, 400.0)] {
+            frames.size = size;
+            for accessory in 0..3 {
+                app.palette_open = accessory > 0;
+                app.tin_open = accessory == 2;
+                frames.settle(app);
+                let screen = Rect::from_min_size(Pos2::ZERO, size);
+                let controls: Vec<_> = ["top-rect", "dock-rect", "strip-rect", "tin-rect"].into_iter()
+                    .filter_map(|key| frames.ctx.data(|d| d.get_temp::<Rect>(Id::new(key))).map(|r| (key, r))).collect();
+                for (i, (name, rect)) in controls.iter().enumerate() {
+                    assert!(screen.expand(0.5).contains_rect(*rect), "{edge:?} {size:?} {accessory}: {name} {rect:?} outside screen");
+                    for (other, other_rect) in &controls[i + 1..] {
+                        assert!(!rect.shrink(0.5).intersects(*other_rect), "{edge:?} {size:?} {accessory}: {name} {rect:?} overlaps {other} {other_rect:?}");
+                    }
+                }
+                let header_faces: Vec<_> = frames.output.as_ref().unwrap().shapes.iter().filter_map(|shape| {
+                    if let Shape::Rect(r) = &shape.shape {
+                        if r.fill.a() == 255 && (r.rect.height() - 40.0).abs() < 0.1 && r.rect.top() < 52.0 { return Some(r.rect); }
+                    }
+                    None
+                }).collect();
+                for (i, face) in header_faces.iter().enumerate() {
+                    assert!(screen.contains_rect(*face));
+                    for other in &header_faces[i + 1..] { assert!(!face.intersects(*other), "header buttons overlap"); }
+                }
+                if edge == DockEdge::Bottom && size.x == 320.0 && accessory == 2 { frames.snapshot("responsive-note-small"); }
+            }
+        }
+    }
+}
+
+#[test]
+fn responsive_shelf_reflows_without_changing_saved_slots() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("A notebook with a deliberately long title");
+    let bin_id = fixture.notebook("In the bin");
+    fixture.app.lib.trash_note(bin_id);
+    let original_slot = fixture.app.lib.index.notes.iter().find(|n| n.id == id).unwrap().slot;
+    let app = &mut fixture.app;
+    let mut frames = Frames::new(app);
+    for size in [vec2(1280.0, 860.0), vec2(320.0, 280.0), vec2(360.0, 640.0), vec2(1024.0, 320.0)] {
+        frames.size = size;
+        for bin in [false, true] {
+            app.shelf_trash = bin;
+            frames.settle(app);
+            let screen = Rect::from_min_size(Pos2::ZERO, size);
+            let search = frames.ctx.memory(|m| m.area_rect(Id::new("shelf-search"))).unwrap();
+            let actions = frames.ctx.memory(|m| m.area_rect(Id::new("shelf-top-right"))).unwrap();
+            assert!(screen.contains_rect(search), "search {search:?} {size:?}");
+            assert!(screen.contains_rect(actions));
+            assert!(!search.intersects(actions), "shelf header overlap {size:?}");
+            if bin { assert!(screen.contains_rect(app.bin_close_rect)); }
+            for rect in app.shelf_grid.iter().chain(&app.trash_grid).filter(|r| r.is_positive()) {
+                assert!(screen.contains_rect(*rect));
+                assert!(!rect.intersects(search));
+                assert!(!rect.intersects(actions));
+            }
+            assert_eq!(app.lib.index.notes.iter().find(|n| n.id == id).unwrap().slot, original_slot);
+            if size.x == 320.0 { frames.snapshot(if bin { "responsive-bin-small" } else { "responsive-shelf-small" }); }
+        }
+    }
+    frames.size = vec2(320.0, 280.0);
+    app.shelf_trash = false;
+    app.lib.index.fiche_pliee = false;
+    frames.settle(app);
+    let help = frames.ctx.memory(|m| m.area_rect(Id::new("shelf-tuto-fiche"))).unwrap();
+    assert!(Rect::from_min_size(Pos2::ZERO, frames.size).contains_rect(help));
+    frames.snapshot("responsive-help-small");
+    frames.key(app, Key::Escape);
+    assert!(app.lib.index.fiche_pliee);
+}
+
+#[test]
+fn compact_controls_keep_drag_selection_and_wheel_actions_accessible() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Compact interactions");
+    let app = &mut fixture.app;
+    let mut frames = Frames::new(app);
+    frames.size = vec2(320.0, 280.0);
+    frames.settle(app);
+    let start = pos2(28.0, 160.0);
+    frames.touch(app, TouchPhase::Start, start);
+    app.open_spine_wheel(id, start, &frames.ctx, false);
+    frames.settle(app);
+    let (center, scale) = fitted_wheel(Rect::from_min_size(Pos2::ZERO, frames.size), start);
+    let wheel = Rect::from_center_size(center, Vec2::splat(WHEEL_OUT * scale * 2.0));
+    assert!(Rect::from_min_size(Pos2::ZERO, frames.size).contains_rect(wheel));
+    frames.snapshot("responsive-wheel-small");
+    frames.touch(app, TouchPhase::End, start);
+    assert!(app.spine_wheel.is_none());
+    assert!(app.emoji_pick.is_none());
+    assert!(app.shelf_toss.is_empty());
+    assert!(!app.lib.load_note(id).unwrap().pinned);
+    app.open_note(id);
+    app.note.as_mut().unwrap().add_unit_at(1, 0);
+    frames.settle(app);
+    let dock = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("dock-rect"))).unwrap();
+    frames.drag(app, dock.min + vec2(30.0, 29.0), pos2(310.0, 160.0));
+    frames.settle(app);
+    assert_eq!(app.dock_edge, DockEdge::Right);
+    app.start_page_delete();
+    frames.settle(app);
+    let cancel = frames.text_center("Cancel");
+    let delete = frames.text_center("Delete (0)");
+    assert!(cancel.x < delete.x && cancel.y < 78.0 && delete.y < 78.0);
+    frames.snapshot("responsive-page-selection-small");
+    frames.touch(app, TouchPhase::Start, cancel);
+    frames.touch(app, TouchPhase::End, cancel);
+    assert!(app.page_delete.is_none());
+}
+
+#[test]
+fn scrolling_compact_toolbar_does_not_zoom_the_page() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Scroll tools");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.size = vec2(360.0, 640.0);
+    frames.settle(app);
+    let dock = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("dock-rect"))).unwrap();
+    let camera = app.camera;
+    frames.step(app, vec![Event::PointerMoved(dock.center()), Event::MouseWheel {
+        unit: MouseWheelUnit::Point, delta: vec2(-150.0, -50.0), modifiers: Modifiers::NONE,
+    }]);
+    frames.settle(app);
+    assert_eq!(app.camera.zoom, camera.zoom);
+    assert_eq!(app.camera.pan, camera.pan);
+}
+
+#[test]
+fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Notebook menu");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let more = pos2(frames.size.x - 30.0, 26.0);
+    frames.drag(app, more, more);
+    frames.settle(app);
+    assert!(Popup::is_any_open(&frames.ctx));
+    let last = frames.text_center("Move to trash");
+    assert!(frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
+        matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Move to trash") && shape.clip_rect.contains(last)
+    }), "all menu actions should fit in a normal window");
+    frames.snapshot("notebook-menu");
+    let pin = frames.text_center("Pin");
+    frames.touch(app, TouchPhase::Start, pin);
+    frames.touch(app, TouchPhase::End, pin);
+    assert!(app.note.as_ref().unwrap().pinned);
+    frames.drag(app, more, more);
+    frames.settle(app);
+    let separate = frames.text_center("Separate pages");
+    frames.drag(app, separate, separate);
+    assert_eq!(app.note.as_ref().unwrap().sheet_join, SheetJoin::Separate);
+    frames.drag(app, more, more);
+    frames.settle(app);
+    frames.key(app, Key::Escape);
+    assert!(!Popup::is_any_open(&frames.ctx));
+    assert!(matches!(app.scene, Scene::Desk));
+    frames.size.y = 400.0;
+    frames.settle(app);
+    frames.drag(app, more, more);
+    frames.settle(app);
+    assert!(Popup::is_any_open(&frames.ctx));
+    frames.snapshot("notebook-menu-short");
+    let save = frames.text_center("Save");
+    assert!(save.y > 0.0 && save.y < frames.size.y);
+    let mut reached_last = false;
+    for _ in 0..48 {
+        frames.key(app, Key::Tab);
+        frames.settle(app);
+        let last = frames.text_center("Move to trash");
+        if frames.ctx.memory(|m| m.focused()).and_then(|id| frames.ctx.read_response(id))
+            .is_some_and(|response| response.rect.contains(last)) {
+            reached_last = true;
+            assert!(last.y > 52.0 && last.y < frames.size.y);
+            break;
+        }
+    }
+    assert!(reached_last, "keyboard navigation must reveal clipped menu actions");
+}
+
+#[test]
+fn ink_tin_keeps_color_picking_and_fits_after_resize() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Ink tin");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    app.palette_open = true;
+    app.tin_open = true;
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    for (input, col) in [(0, 2), (1, 6), (2, 9)] {
+        let id = Id::new(("tin-pan", 0, col));
+        let hit = frames.ctx.read_response(id).unwrap().rect;
+        match input {
+            0 => frames.drag(app, hit.center(), hit.center()),
+            1 => {
+                frames.touch(app, TouchPhase::Start, hit.center());
+                frames.touch(app, TouchPhase::End, hit.center());
+            }
+            _ => {
+                frames.ctx.memory_mut(|m| m.request_focus(id));
+                frames.key(app, Key::Enter);
+            }
+        }
+        assert_eq!(app.ink, hsv_to_rgb(col as f32 / 12.0, 0.88, 0.92));
+        assert!(app.tin_open);
+    }
+    frames.settle(app);
+    let tin = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("tin-rect"))).unwrap();
+    let strip = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("strip-rect"))).unwrap();
+    assert!(!tin.intersects(strip), "advanced colours must not cover the ink strip");
+    frames.snapshot("ink-tin");
+    frames.size = vec2(900.0, 500.0);
+    frames.settle(app);
+    let tin = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("tin-rect"))).unwrap();
+    assert!(Rect::from_min_size(Pos2::ZERO, frames.size).contains_rect(tin));
+    frames.snapshot("ink-tin-short");
+    frames.key(app, Key::Escape);
+    assert!(!app.tin_open && app.palette_open);
+    assert!(matches!(app.scene, Scene::Desk));
+}
+
+#[test]
+fn ink_fields_use_continuous_meshes() {
+    let ctx = Context::default();
+    let output = ctx.run(RawInput::default(), |ctx| {
+        let painter = ctx.layer_painter(LayerId::background());
+        paint_sv_field(&painter, Rect::from_min_size(Pos2::ZERO, vec2(204.0, 132.0)), 0.5);
+        paint_hue_bar(&painter, Rect::from_min_size(pos2(0.0, 144.0), vec2(204.0, 16.0)));
+    });
+    let meshes: Vec<_> = output.shapes.iter().filter_map(|shape| {
+        if let Shape::Mesh(mesh) = &shape.shape { Some(mesh) } else { None }
+    }).collect();
+    assert_eq!(meshes.len(), 2, "one continuous mesh per colour field");
+    for mesh in &meshes { assert!(mesh.is_valid()); }
+    assert_eq!(meshes[0].vertices.first().unwrap().color, Color32::WHITE);
+    assert_eq!(meshes[0].vertices.last().unwrap().color, Color32::BLACK);
+    assert_eq!(meshes[1].vertices.first().unwrap().color, meshes[1].vertices.last().unwrap().color);
+}
+
+#[test]
+fn vector_spine_wheel_preserves_mouse_and_touch_actions() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Wheel");
+    let app = &mut fixture.app;
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let center = pos2(600.0, 360.0);
+    app.open_spine_wheel(id, center, &frames.ctx, true);
+    frames.settle(app);
+    frames.snapshot("wheel-vector-actions");
+    let pin = slice_mid(center, 0, 4, 104.0);
+    frames.drag(app, pin, pin);
+    assert!(app.lib.load_note(id).unwrap().pinned);
+    app.open_spine_wheel(id, center, &frames.ctx, true);
+    frames.settle(app);
+    let color = slice_mid(center, 1, 4, 104.0);
+    frames.drag(app, color, color);
+    assert!(app.spine_wheel.as_ref().unwrap().colors);
+    frames.settle(app);
+    frames.snapshot("wheel-cover-colors");
+    let cover = slice_mid(center, 3, app.look.cloth.len(), 104.0);
+    frames.drag(app, cover, cover);
+    assert_eq!(app.lib.load_note(id).unwrap().cover, 3);
+    frames.touch(app, TouchPhase::Start, center);
+    app.open_spine_wheel(id, center, &frames.ctx, false);
+    let mark = slice_mid(center, 3, 4, 104.0);
+    frames.touch(app, TouchPhase::Move, mark);
+    frames.touch(app, TouchPhase::End, mark);
+    assert_eq!(app.emoji_pick, Some(id));
+    assert!(!app.lib.is_trashed(id));
+}
+
+#[test]
+fn home_return_button_saves_and_accepts_mouse_touch_and_keyboard() {
+    for input in 0..4 {
+        let mut fixture = Fixture::new();
+        let id = fixture.notebook("Return");
+        let app = &mut fixture.app;
+        app.open_note(id);
+        app.note.as_mut().unwrap().title = "Saved on return".into();
+        app.title_buf = "Saved on return".into();
+        app.mark_dirty();
+        let mut frames = Frames::new(app);
+        frames.settle(app);
+        if input == 0 {
+            frames.snapshot("note-home-return");
+        }
+        frames.key(app, Key::Tab);
+        let focused = frames.ctx.memory(|m| m.focused()).expect("return button is keyboard reachable");
+        let button = frames.ctx.read_response(focused).unwrap().rect;
+        assert!(button.min.x < 60.0 && button.max.y <= 52.0);
+        assert_eq!(button.size(), vec2(44.0, 44.0));
+        match input {
+            0 => frames.drag(app, button.center(), button.center()),
+            1 => {
+                frames.touch(app, TouchPhase::Start, button.center());
+                frames.touch(app, TouchPhase::End, button.center());
+            }
+            2 => frames.key(app, Key::Enter),
+            _ => frames.key(app, Key::Space),
+        }
+        assert!(matches!(app.scene, Scene::Shelf { .. }));
+        assert!(app.note.is_none());
+        assert_eq!(app.lib.load_note(id).unwrap().title, "Saved on return");
+        assert!(!app.lib.is_trashed(id));
+    }
+}
+
+#[test]
+fn colored_note_tools_preserve_ink_and_support_mouse_and_touch() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Papeterie");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let ink = app.ink;
+    let paper = app.note.as_ref().unwrap().paper;
+    let mut frames = Frames::new(app);
+    let tool_center = |frames: &Frames, fill| {
+        frames.output.as_ref().unwrap().shapes.iter().find_map(|shape| {
+            if let Shape::Rect(rect) = &shape.shape {
+                if rect.fill == fill && (rect.rect.width() - 40.0).abs() < 0.1 {
+                    return Some(rect.rect.center());
+                }
+            }
+            None
+        }).expect("coloured tool face is rendered")
+    };
+    for (edge, size, touch) in [
+        (DockEdge::Bottom, vec2(1280.0, 860.0), false),
+        (DockEdge::Right, vec2(900.0, 1050.0), true),
+    ] {
+        app.dock_edge = edge;
+        app.tool = Tool::Fineliner;
+        frames.size = size;
+        frames.settle(app);
+        let brush = tool_center(&frames, app.tool_well_fill(Tool::Brush, false));
+        if touch {
+            frames.touch(app, TouchPhase::Start, brush);
+            frames.touch(app, TouchPhase::End, brush);
+        } else {
+            frames.drag(app, brush, brush);
+        }
+        frames.step(app, vec![Event::PointerMoved(Pos2::ZERO)]);
+        frames.settle(app);
+        assert_eq!(app.tool, Tool::Brush);
+        assert_eq!(app.ink, ink, "control pigments must not change the drawing ink");
+        assert_eq!(app.note.as_ref().unwrap().paper, paper);
+        tool_center(&frames, app.tool_well_fill(Tool::Brush, true));
+        app.palette_open = true;
+        frames.settle(app);
+        let dock = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("dock-rect"))).unwrap();
+        assert!(Rect::from_min_size(Pos2::ZERO, size).contains_rect(dock));
+        let strip = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("strip-rect"))).unwrap();
+        assert!(Rect::from_min_size(Pos2::ZERO, size).contains_rect(strip));
+        if touch {
+            assert!(strip.width() <= 60.0, "vertical palette must remain a narrow strip");
+            assert!(strip.max.x <= dock.min.x, "palette must not cover the tools");
+        }
+        frames.snapshot(if touch { "note-colors-vertical" } else { "note-colors-horizontal" });
+    }
+    let original_case = app.note_case_color();
+    app.note.as_mut().unwrap().cover = 3;
+    assert_ne!(app.note_case_color(), original_case);
+    let theme_pigment = Color32::from_rgb(85, 130, 170);
+    app.look.inks[8] = theme_pigment;
+    frames.step(app, vec![]);
+    tool_center(&frames, theme_pigment);
+    assert_eq!(app.ink, ink);
+}
+
+#[test]
+fn page_trash_selection_is_explicit_and_batch_undo_restores_pages() {
+    for (join, touch) in [(SheetJoin::Linked, false), (SheetJoin::Separate, true)] {
+        let mut fixture = Fixture::new();
+        let id = fixture.notebook("Pages");
+        let app = &mut fixture.app;
+        app.open_note(id);
+        let note = app.note.as_mut().unwrap();
+        note.add_unit_at(1, 0);
+        note.add_unit_at(2, 0);
+        note.sheet_join = join;
+        let before = serde_json::to_value(&note.pages).unwrap();
+        let mut frames = Frames::new(app);
+        frames.settle(app);
+        app.fit_to_screen();
+        frames.settle(app);
+        frames.snapshot("note-toolbar-trash");
+        app.start_page_delete();
+        frames.settle(app);
+        let hit = app.unit_screen_rect(app.canvas_rect, 0, 0).intersect(app.canvas_rect);
+        if touch {
+            frames.touch(app, TouchPhase::Start, hit.center());
+            assert_eq!(app.note.as_ref().unwrap().pages.len(), 3);
+            frames.touch(app, TouchPhase::End, hit.center());
+        } else {
+            frames.drag(app, hit.center(), hit.center());
+        }
+        assert_eq!(app.note.as_ref().unwrap().pages.len(), 3);
+        assert_eq!(app.page_delete.as_ref().unwrap(), &vec![(0, 0)]);
+        frames.settle(app);
+        frames.snapshot("note-page-selection");
+        frames.key(app, Key::Escape);
+        assert!(app.page_delete.is_none());
+        assert_eq!(app.note.as_ref().unwrap().pages.len(), 3);
+        app.start_page_delete();
+        app.page_delete = Some(vec![(0, 0), (1, 0), (2, 0)]);
+        app.delete_selected_pages();
+        assert_eq!(app.note.as_ref().unwrap().pages.len(), 3);
+        app.page_delete = Some(vec![(0, 0), (1, 0)]);
+        app.delete_selected_pages();
+        assert_eq!(app.note.as_ref().unwrap().pages.len(), 1);
+        assert!(app.note.as_ref().unwrap().unit_occupied(2, 0));
+        assert!(app.undo.undo(app.note.as_mut().unwrap()));
+        assert_eq!(serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap(), before);
+    }
+}
+
+#[test]
 fn corner_drop_reopens_smoothly_and_targets_bottom_right() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Drop");
@@ -370,7 +813,72 @@ fn corner_drop_reopens_smoothly_and_targets_bottom_right() {
 }
 
 #[test]
-fn drawer_grip_click_closes_without_deleting_and_can_reopen() {
+fn emoji_picker_reopens_above_backdrop_and_accepts_mouse_and_touch() {
+    let mut fixture = Fixture::new();
+    let first = fixture.notebook("First");
+    let second = fixture.notebook("Second");
+    let app = &mut fixture.app;
+    let expected = app.emoji.catalog().first().expect("emoji font").to_string();
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    for id in [first, second, first] {
+        app.emoji_pick = Some(id);
+        frames.settle(app);
+        let outside = pos2(4.0, 4.0);
+        frames.drag(app, outside, outside);
+        assert!(app.emoji_pick.is_none());
+        frames.settle(app);
+
+        app.emoji_pick = Some(id);
+        frames.settle(app);
+        let sheet = frames
+            .ctx
+            .memory(|m| m.area_rect(Id::new("emoji-pick")))
+            .unwrap();
+        let cell = sheet.min + vec2(32.0, 32.0);
+        assert_eq!(
+            frames.ctx.layer_id_at(cell),
+            Some(LayerId::new(Order::Foreground, Id::new("emoji-pick")))
+        );
+        if id == second {
+            frames.touch(app, TouchPhase::Start, cell);
+            frames.touch(app, TouchPhase::End, cell);
+        } else {
+            frames.drag(app, cell, cell);
+        }
+        assert!(
+            app.emoji_pick.is_none(),
+            "emoji cell must receive the click"
+        );
+        assert_eq!(app.lib.load_note(id).unwrap().emoji, expected);
+        frames.settle(app);
+    }
+    assert!(
+        app.emoji_tex.len() < app.emoji.catalog().len() / 2,
+        "opening must not decode the whole catalog"
+    );
+}
+
+#[test]
+fn emoji_picker_fits_small_window_and_escape_closes_it() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Small window");
+    let app = &mut fixture.app;
+    let mut frames = Frames::new(app);
+    frames.size = vec2(360.0, 320.0);
+    app.emoji_pick = Some(id);
+    frames.settle(app);
+    let sheet = frames
+        .ctx
+        .memory(|m| m.area_rect(Id::new("emoji-pick")))
+        .unwrap();
+    assert!(Rect::from_min_size(Pos2::ZERO, frames.size).contains_rect(sheet));
+    frames.key(app, Key::Escape);
+    assert!(app.emoji_pick.is_none());
+}
+
+#[test]
+fn drawer_close_button_closes_without_deleting_and_can_reopen() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Keep in trash");
     let app = &mut fixture.app;
@@ -378,11 +886,12 @@ fn drawer_grip_click_closes_without_deleting_and_can_reopen() {
     app.shelf_trash = true;
     let mut frames = Frames::new(app);
     frames.settle(app);
-    frames.snapshot("bin-drawer-grip");
+    frames.snapshot("bin-drawer-actions");
     let height = app.bin_panel_height;
-    let grip = app.bin_handle_rect.center();
-    assert!(app.bin_handle_rect.height() >= 44.0);
-    frames.drag(app, grip, grip);
+    let close = app.bin_close_rect.center();
+    assert!(app.bin_close_rect.height() >= 44.0);
+    assert!(app.bin_close_rect.min.y > app.trash_rect.center().y);
+    frames.drag(app, close, close);
     assert!(!app.shelf_trash);
     assert!(!app.shelf_band_armed);
     assert!(app.lib.is_trashed(id));
@@ -401,58 +910,18 @@ fn drawer_grip_click_closes_without_deleting_and_can_reopen() {
 }
 
 #[test]
-fn drawer_grip_touch_tap_and_downward_swipe_close() {
-    for distance in [0.0, 80.0] {
-        let mut fixture = Fixture::new();
-        let app = &mut fixture.app;
-        app.shelf_trash = true;
-        let mut frames = Frames::new(app);
-        frames.settle(app);
-        let height = app.bin_panel_height;
-        let origin = app.bin_handle_rect.center();
-        frames.touch(app, TouchPhase::Start, origin);
-        assert_eq!(app.bin_handle_drag.map(|(pos, _)| pos), Some(origin));
-        assert!(app.shelf_band.is_none());
-        let target = origin + vec2(0.0, distance);
-        if distance > 0.0 {
-            frames.touch(app, TouchPhase::Move, target);
-            assert!((app.bin_panel_height - (height - distance)).abs() < 1.0);
-            frames.snapshot("bin-drawer-touch-drag");
-        }
-        frames.touch(app, TouchPhase::End, target);
-        assert!(!app.shelf_trash);
-        frames.settle(app);
-        assert_eq!(app.bin_panel_height, 0.0);
-        assert!(app.bin_handle_drag.is_none());
-        assert_eq!(app.trash_reveal, 0.0);
-    }
-}
-
-#[test]
-fn drawer_grip_short_sideways_upward_and_cancelled_swipes_stay_open() {
-    for (delta, phase) in [
-        (vec2(0.0, 24.0), TouchPhase::End),
-        (vec2(110.0, 70.0), TouchPhase::End),
-        (vec2(0.0, -80.0), TouchPhase::End),
-        (vec2(0.0, 90.0), TouchPhase::Cancel),
-    ] {
-        let mut fixture = Fixture::new();
-        let app = &mut fixture.app;
-        app.shelf_trash = true;
-        let mut frames = Frames::new(app);
-        frames.settle(app);
-        let height = app.bin_panel_height;
-        let origin = app.bin_handle_rect.center();
-        frames.touch(app, TouchPhase::Start, origin);
-        frames.touch(app, TouchPhase::Move, origin + delta);
-        frames.touch(app, phase, origin + delta);
-        frames.settle(app);
-        assert!(app.shelf_trash, "gesture {delta:?}, {phase:?}");
-        assert_eq!(app.bin_panel_height, height);
-        assert!(app.bin_handle_drag.is_none());
-        assert!(app.shelf_band.is_none());
-        assert!(!app.shelf_haul_armed);
-    }
+fn drawer_close_button_accepts_touch() {
+    let mut fixture = Fixture::new();
+    let app = &mut fixture.app;
+    app.shelf_trash = true;
+    let mut frames = Frames::new(app);
+    frames.settle(app);
+    let close = app.bin_close_rect.center();
+    frames.touch(app, TouchPhase::Start, close);
+    frames.touch(app, TouchPhase::End, close);
+    assert!(!app.shelf_trash);
+    frames.settle(app);
+    assert_eq!(app.bin_panel_height, 0.0);
 }
 
 #[test]
@@ -476,7 +945,7 @@ fn drawer_keyboard_close_respects_modal_priority_and_selected_notebooks() {
                 frames.key(app, Key::Tab);
                 if frames
                     .ctx
-                    .memory(|m| m.has_focus(Id::new("bin-drawer-handle")))
+                    .memory(|m| m.has_focus(Id::new("close-trash")))
                 {
                     break;
                 }
@@ -484,12 +953,12 @@ fn drawer_keyboard_close_respects_modal_priority_and_selected_notebooks() {
             assert!(
                 frames
                     .ctx
-                    .memory(|m| m.has_focus(Id::new("bin-drawer-handle")))
+                    .memory(|m| m.has_focus(Id::new("close-trash")))
             );
         } else if key == Key::Space {
             frames
                 .ctx
-                .memory_mut(|m| m.request_focus(Id::new("bin-drawer-handle")));
+                .memory_mut(|m| m.request_focus(Id::new("close-trash")));
         }
         frames.key(app, key);
         assert!(!app.shelf_trash, "{key:?} should close the drawer");
@@ -501,35 +970,7 @@ fn drawer_keyboard_close_respects_modal_priority_and_selected_notebooks() {
 }
 
 #[test]
-fn drawer_grip_second_finger_cancels_without_turning_release_into_click() {
-    let mut fixture = Fixture::new();
-    let app = &mut fixture.app;
-    app.shelf_trash = true;
-    let mut frames = Frames::new(app);
-    frames.settle(app);
-    let origin = app.bin_handle_rect.center();
-    frames.touch(app, TouchPhase::Start, origin);
-    for phase in [TouchPhase::Start, TouchPhase::End] {
-        frames.step(
-            app,
-            vec![Event::Touch {
-                device_id: TouchDeviceId(1),
-                id: TouchId(2),
-                phase,
-                pos: origin + vec2(40.0, 0.0),
-                force: None,
-            }],
-        );
-        assert!(app.bin_handle_drag.is_none());
-    }
-    frames.touch(app, TouchPhase::End, origin);
-    assert!(app.shelf_trash);
-    frames.settle(app);
-    assert_eq!(app.bin_panel_height, CahierApp::shelf_slot().y + 20.0);
-}
-
-#[test]
-fn notebook_drag_over_grip_never_dismisses_drawer() {
+fn notebook_drag_over_close_button_never_dismisses_drawer() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Move past grip");
     let app = &mut fixture.app;
@@ -543,12 +984,12 @@ fn notebook_drag_over_grip_never_dismisses_drawer() {
         .unwrap()
         .1
         .center();
-    let grip = app.bin_handle_rect.center();
-    frames.drag(app, source, grip);
+    let close = app.bin_close_rect.center();
+    frames.drag(app, source, close);
     assert!(app.shelf_trash);
     assert!(!app.lib.is_trashed(id));
-    assert!(app.bin_handle_drag.is_none());
-    frames.drag(app, source, grip + vec2(0.0, 80.0));
+    let target = app.trash_grid[0].center();
+    frames.drag(app, source, target);
     assert!(app.shelf_trash);
     assert!(app.lib.is_trashed(id));
 }
@@ -656,6 +1097,53 @@ fn home_drop_uses_corner_until_toss_completes() {
     assert!(app.shelf_toss.is_empty());
     assert!(app.lib.is_trashed(id));
     assert_eq!(app.trash_reveal, 0.0);
+}
+
+#[test]
+fn linked_paper_layers_share_pixel_aligned_edges() {
+    let mut fixture = Fixture::new();
+    let id = fixture.notebook("Continuous paper");
+    let app = &mut fixture.app;
+    app.open_note(id);
+    let note = app.note.as_mut().unwrap();
+    note.pages.extend([(1, 0), (0, 1), (1, 1)].map(|(x, y)| crate::document::Page::at(x, y)));
+    note.paper = PaperKind::Grid;
+    let ctx = Context::default();
+    let canvas = Rect::from_min_size(Pos2::ZERO, vec2(2400.0, 2400.0));
+    for density in [1.0, 1.25, 2.0] {
+        ctx.set_pixels_per_point(density);
+        for zoom in [0.125, 0.333, 0.625] {
+            app.camera = Camera { pan: vec2(33.37, 47.19), zoom };
+            let output = ctx.run(RawInput {
+                screen_rect: Some(canvas),
+                ..Default::default()
+            }, |ctx| {
+                let painter = ctx.layer_painter(LayerId::background()).with_clip_rect(canvas);
+                app.paint_world(&painter, canvas);
+            });
+            let mut surfaces = Vec::new();
+            let mut started_grain = false;
+            for shape in &output.shapes {
+                if let egui::epaint::Shape::Rect(rect) = &shape.shape {
+                    if rect.brush.is_some() {
+                        started_grain = true;
+                        surfaces.push(shape.clip_rect);
+                    } else if rect.fill == app.look.paper {
+                        assert!(!started_grain, "opaque paper must never cover grain or ruling");
+                    }
+                }
+            }
+            assert_eq!(surfaces.len(), 4);
+            assert_eq!(surfaces[0].max.x, surfaces[1].min.x);
+            assert_eq!(surfaces[0].max.y, surfaces[2].min.y);
+            assert_eq!(surfaces[1].max.y, surfaces[3].min.y);
+            assert_eq!(surfaces[2].max.x, surfaces[3].min.x);
+            for edge in surfaces.iter().flat_map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]) {
+                let pixel = edge * output.pixels_per_point;
+                assert!((pixel - pixel.round()).abs() < 0.001, "fractional scissor edge: {pixel}");
+            }
+        }
+    }
 }
 
 #[test]

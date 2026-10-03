@@ -1,28 +1,48 @@
 # Cahier
 
-Stylus notes, like Samsung Notes / Apple Notes, sitting on an **Omarchy lectern**.
+Stylus notes on an **Omarchy lectern**. Cahier is a native Rust and egui app for handwritten notes, sketches, and diagrams.
 
-Two objects: the **shelf** (notebook spines) and the **page** (paper, pencil case, ruler). Chrome follows the active Omarchy theme; paper stays paper.
+The **shelf** holds your notebooks; each notebook opens onto a page with paper, drawing tools, and a ruler. The interface follows the active Omarchy theme, while the paper keeps its own look.
 
-Local data only — `~/.local/share/omacourses`. No account, no sync.
+Your notes stay on your computer in `~/.local/share/omacourses`. Cahier needs no account or network connection.
 
-![Shelf — notebook spines](docs/screens/etagere.png)
+## Nouveautés
 
-![Lined sketch — Mindset](docs/screens/feuille.png)
+### Plusieurs pages, deux façons de les lire
 
-![Graph paper — Art direction](docs/screens/millimetre.png)
+Ajoutez des pages autour de la feuille. Affichez-les bord à bord en mode *Linked*, ou gardez un espace entre elles en mode *Separate*.
 
-### Sheets & bin
+<p align="center">
+  <img src="docs/screens/liees.png" alt="Pages liées, bord à bord" width="49%">
+  <img src="docs/screens/separees.png" alt="Pages séparées par un espace" width="49%">
+</p>
 
-Linked pages share one flush sheet; Separate keeps a gutter. Each free edge gets a `+` tab (a shared hole gets one tab in the center). The wastebasket opens a red bin row under the shelf.
+Les onglets `+` ajoutent une page sur un bord libre.
 
-![Linked pages — flush join](docs/screens/liees.png)
+<p align="center">
+  <img src="docs/screens/onglets.png" alt="Onglets pour ajouter une page" width="80%">
+</p>
 
-![Separate pages — gutter between units](docs/screens/separees.png)
+### Du papier pour chaque idée
 
-![Sheet tabs — add a unit on any free edge](docs/screens/onglets.png)
+Choisissez une feuille lignée, quadrillée, pointillée, millimétrée ou vierge. Le papier Canson apporte un grain discret aux notes et aux croquis.
 
-![Bin — trash row under the shelf](docs/screens/corbeille.png)
+<p align="center">
+  <img src="docs/screens/millimetre.png" alt="Papier millimétré et outils de dessin" width="80%">
+</p>
+
+### Une étagère et une corbeille
+
+Retrouvez vos carnets sur l’étagère et restaurez ceux placés dans la corbeille.
+
+<p align="center">
+  <img src="docs/screens/etagere.png" alt="Étagère des carnets" width="49%">
+  <img src="docs/screens/corbeille.png" alt="Carnets dans la corbeille" width="49%">
+</p>
+
+## Aperçu
+
+![Page lignée avec outils de dessin](docs/screens/feuille.png)
 
 ## Run
 

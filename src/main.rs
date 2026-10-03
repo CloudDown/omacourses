@@ -93,7 +93,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 860.0])
-            .with_min_inner_size([800.0, 560.0])
+            .with_min_inner_size([320.0, 280.0])
             .with_title("Notes")
             .with_app_id("com.clouddown.cahier"),
         vsync: false,
