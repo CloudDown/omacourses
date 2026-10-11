@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            gcc \
+            libc6-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libgl1-mesa-dev \
+            libegl1-mesa-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            fontconfig
+
+      - name: Build release binary
+        run: |
+          cargo build --locked --release --bin cahier
+          cp target/release/cahier cahier-x86_64-unknown-linux-gnu
+          strip cahier-x86_64-unknown-linux-gnu
+
+      - name: Attach binary to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: cahier-x86_64-unknown-linux-gnu
+          generate_release_notes: true

@@ -8,10 +8,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!("cahier-ui-{}", Uuid::new_v4()));
-        let lib = Library {
-            root: root.clone(),
-            index: Default::default(),
-        };
+        let lib = Library::fresh(root.clone());
         Self {
             app: CahierApp::with_library(Look::load(), lib),
             root,
@@ -21,7 +18,7 @@ impl Fixture {
     fn notebook(&mut self, name: &str) -> Uuid {
         let note = Note::blank(name, 0);
         let id = note.id;
-        self.app.lib.insert_new(&note);
+        self.app.lib.insert_new(&note).expect("save notebook");
         id
     }
 }
@@ -95,14 +92,20 @@ impl Frames {
     }
 
     fn text_center(&self, label: &str) -> Pos2 {
-        self.output.as_ref().unwrap().shapes.iter().find_map(|shape| {
-            if let Shape::Text(text) = &shape.shape {
-                if text.galley.text() == label {
-                    return Some(text.pos + text.galley.rect.center().to_vec2());
+        self.output
+            .as_ref()
+            .unwrap()
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                if let Shape::Text(text) = &shape.shape {
+                    if text.galley.text() == label {
+                        return Some(text.pos + text.galley.rect.center().to_vec2());
+                    }
                 }
-            }
-            None
-        }).unwrap_or_else(|| panic!("visible label: {label}"))
+                None
+            })
+            .unwrap_or_else(|| panic!("visible label: {label}"))
     }
 
     fn drag(&mut self, app: &mut CahierApp, from: Pos2, to: Pos2) {
@@ -359,35 +362,72 @@ fn responsive_note_controls_do_not_overlap_through_resizes() {
     let app = &mut fixture.app;
     app.open_note(id);
     let mut frames = Frames::new(app);
-    for edge in [DockEdge::Bottom, DockEdge::Left, DockEdge::Top, DockEdge::Right] {
+    for edge in [
+        DockEdge::Bottom,
+        DockEdge::Left,
+        DockEdge::Top,
+        DockEdge::Right,
+    ] {
         app.dock_edge = edge;
-        for size in [vec2(1280.0, 860.0), vec2(320.0, 280.0), vec2(360.0, 640.0),
-            vec2(1024.0, 320.0), vec2(760.0, 560.0), vec2(600.0, 400.0)] {
+        for size in [
+            vec2(1280.0, 860.0),
+            vec2(320.0, 280.0),
+            vec2(360.0, 640.0),
+            vec2(1024.0, 320.0),
+            vec2(760.0, 560.0),
+            vec2(600.0, 400.0),
+        ] {
             frames.size = size;
             for accessory in 0..3 {
                 app.palette_open = accessory > 0;
                 app.tin_open = accessory == 2;
                 frames.settle(app);
                 let screen = Rect::from_min_size(Pos2::ZERO, size);
-                let controls: Vec<_> = ["top-rect", "dock-rect", "strip-rect", "tin-rect"].into_iter()
-                    .filter_map(|key| frames.ctx.data(|d| d.get_temp::<Rect>(Id::new(key))).map(|r| (key, r))).collect();
+                let controls: Vec<_> = ["top-rect", "dock-rect", "strip-rect", "tin-rect"]
+                    .into_iter()
+                    .filter_map(|key| {
+                        frames
+                            .ctx
+                            .data(|d| d.get_temp::<Rect>(Id::new(key)))
+                            .map(|r| (key, r))
+                    })
+                    .collect();
                 for (i, (name, rect)) in controls.iter().enumerate() {
-                    assert!(screen.expand(0.5).contains_rect(*rect), "{edge:?} {size:?} {accessory}: {name} {rect:?} outside screen");
+                    assert!(
+                        screen.expand(0.5).contains_rect(*rect),
+                        "{edge:?} {size:?} {accessory}: {name} {rect:?} outside screen"
+                    );
                     for (other, other_rect) in &controls[i + 1..] {
                         assert!(!rect.shrink(0.5).intersects(*other_rect), "{edge:?} {size:?} {accessory}: {name} {rect:?} overlaps {other} {other_rect:?}");
                     }
                 }
-                let header_faces: Vec<_> = frames.output.as_ref().unwrap().shapes.iter().filter_map(|shape| {
-                    if let Shape::Rect(r) = &shape.shape {
-                        if r.fill.a() == 255 && (r.rect.height() - 40.0).abs() < 0.1 && r.rect.top() < 52.0 { return Some(r.rect); }
-                    }
-                    None
-                }).collect();
+                let header_faces: Vec<_> = frames
+                    .output
+                    .as_ref()
+                    .unwrap()
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| {
+                        if let Shape::Rect(r) = &shape.shape {
+                            if r.fill.a() == 255
+                                && (r.rect.height() - 40.0).abs() < 0.1
+                                && r.rect.top() < 52.0
+                            {
+                                return Some(r.rect);
+                            }
+                        }
+                        None
+                    })
+                    .collect();
                 for (i, face) in header_faces.iter().enumerate() {
                     assert!(screen.contains_rect(*face));
-                    for other in &header_faces[i + 1..] { assert!(!face.intersects(*other), "header buttons overlap"); }
+                    for other in &header_faces[i + 1..] {
+                        assert!(!face.intersects(*other), "header buttons overlap");
+                    }
                 }
-                if edge == DockEdge::Bottom && size.x == 320.0 && accessory == 2 { frames.snapshot("responsive-note-small"); }
+                if edge == DockEdge::Bottom && size.x == 320.0 && accessory == 2 {
+                    frames.snapshot("responsive-note-small");
+                }
             }
         }
     }
@@ -398,36 +438,80 @@ fn responsive_shelf_reflows_without_changing_saved_slots() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("A notebook with a deliberately long title");
     let bin_id = fixture.notebook("In the bin");
-    fixture.app.lib.trash_note(bin_id);
-    let original_slot = fixture.app.lib.index.notes.iter().find(|n| n.id == id).unwrap().slot;
+    fixture.app.lib.trash_note(bin_id).expect("trash notebook");
+    let original_slot = fixture
+        .app
+        .lib
+        .index
+        .notes
+        .iter()
+        .find(|n| n.id == id)
+        .unwrap()
+        .slot;
     let app = &mut fixture.app;
     let mut frames = Frames::new(app);
-    for size in [vec2(1280.0, 860.0), vec2(320.0, 280.0), vec2(360.0, 640.0), vec2(1024.0, 320.0)] {
+    for size in [
+        vec2(1280.0, 860.0),
+        vec2(320.0, 280.0),
+        vec2(360.0, 640.0),
+        vec2(1024.0, 320.0),
+    ] {
         frames.size = size;
         for bin in [false, true] {
             app.shelf_trash = bin;
             frames.settle(app);
             let screen = Rect::from_min_size(Pos2::ZERO, size);
-            let search = frames.ctx.memory(|m| m.area_rect(Id::new("shelf-search"))).unwrap();
-            let actions = frames.ctx.memory(|m| m.area_rect(Id::new("shelf-top-right"))).unwrap();
+            let search = frames
+                .ctx
+                .memory(|m| m.area_rect(Id::new("shelf-search")))
+                .unwrap();
+            let actions = frames
+                .ctx
+                .memory(|m| m.area_rect(Id::new("shelf-top-right")))
+                .unwrap();
             assert!(screen.contains_rect(search), "search {search:?} {size:?}");
             assert!(screen.contains_rect(actions));
             assert!(!search.intersects(actions), "shelf header overlap {size:?}");
-            if bin { assert!(screen.contains_rect(app.bin_close_rect)); }
-            for rect in app.shelf_grid.iter().chain(&app.trash_grid).filter(|r| r.is_positive()) {
+            if bin {
+                assert!(screen.contains_rect(app.bin_close_rect));
+            }
+            for rect in app
+                .shelf_grid
+                .iter()
+                .chain(&app.trash_grid)
+                .filter(|r| r.is_positive())
+            {
                 assert!(screen.contains_rect(*rect));
                 assert!(!rect.intersects(search));
                 assert!(!rect.intersects(actions));
             }
-            assert_eq!(app.lib.index.notes.iter().find(|n| n.id == id).unwrap().slot, original_slot);
-            if size.x == 320.0 { frames.snapshot(if bin { "responsive-bin-small" } else { "responsive-shelf-small" }); }
+            assert_eq!(
+                app.lib
+                    .index
+                    .notes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .unwrap()
+                    .slot,
+                original_slot
+            );
+            if size.x == 320.0 {
+                frames.snapshot(if bin {
+                    "responsive-bin-small"
+                } else {
+                    "responsive-shelf-small"
+                });
+            }
         }
     }
     frames.size = vec2(320.0, 280.0);
     app.shelf_trash = false;
     app.lib.index.fiche_pliee = false;
     frames.settle(app);
-    let help = frames.ctx.memory(|m| m.area_rect(Id::new("shelf-tuto-fiche"))).unwrap();
+    let help = frames
+        .ctx
+        .memory(|m| m.area_rect(Id::new("shelf-tuto-fiche")))
+        .unwrap();
     assert!(Rect::from_min_size(Pos2::ZERO, frames.size).contains_rect(help));
     frames.snapshot("responsive-help-small");
     frames.key(app, Key::Escape);
@@ -458,7 +542,10 @@ fn compact_controls_keep_drag_selection_and_wheel_actions_accessible() {
     app.open_note(id);
     app.note.as_mut().unwrap().add_unit_at(1, 0);
     frames.settle(app);
-    let dock = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("dock-rect"))).unwrap();
+    let dock = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+        .unwrap();
     frames.drag(app, dock.min + vec2(30.0, 29.0), pos2(310.0, 160.0));
     frames.settle(app);
     assert_eq!(app.dock_edge, DockEdge::Right);
@@ -482,11 +569,22 @@ fn scrolling_compact_toolbar_does_not_zoom_the_page() {
     let mut frames = Frames::new(app);
     frames.size = vec2(360.0, 640.0);
     frames.settle(app);
-    let dock = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("dock-rect"))).unwrap();
+    let dock = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+        .unwrap();
     let camera = app.camera;
-    frames.step(app, vec![Event::PointerMoved(dock.center()), Event::MouseWheel {
-        unit: MouseWheelUnit::Point, delta: vec2(-150.0, -50.0), modifiers: Modifiers::NONE,
-    }]);
+    frames.step(
+        app,
+        vec![
+            Event::PointerMoved(dock.center()),
+            Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: vec2(-150.0, -50.0),
+                modifiers: Modifiers::NONE,
+            },
+        ],
+    );
     frames.settle(app);
     assert_eq!(app.camera.zoom, camera.zoom);
     assert_eq!(app.camera.pan, camera.pan);
@@ -505,9 +603,13 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
     frames.settle(app);
     assert!(Popup::is_any_open(&frames.ctx));
     let last = frames.text_center("Move to trash");
-    assert!(frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
-        matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Move to trash") && shape.clip_rect.contains(last)
-    }), "all menu actions should fit in a normal window");
+    assert!(
+        frames.output.as_ref().unwrap().shapes.iter().any(|shape| {
+            matches!(&shape.shape, Shape::Text(text) if text.galley.text() == "Move to trash")
+                && shape.clip_rect.contains(last)
+        }),
+        "all menu actions should fit in a normal window"
+    );
     frames.snapshot("notebook-menu");
     let download = frames.text_center("Download…");
     frames.touch(app, TouchPhase::Start, download);
@@ -544,14 +646,21 @@ fn notebook_menu_keeps_actions_and_keyboard_dismissal() {
         frames.key(app, Key::Tab);
         frames.settle(app);
         let last = frames.text_center("Move to trash");
-        if frames.ctx.memory(|m| m.focused()).and_then(|id| frames.ctx.read_response(id))
-            .is_some_and(|response| response.rect.contains(last)) {
+        if frames
+            .ctx
+            .memory(|m| m.focused())
+            .and_then(|id| frames.ctx.read_response(id))
+            .is_some_and(|response| response.rect.contains(last))
+        {
             reached_last = true;
             assert!(last.y > 52.0 && last.y < frames.size.y);
             break;
         }
     }
-    assert!(reached_last, "keyboard navigation must reveal clipped menu actions");
+    assert!(
+        reached_last,
+        "keyboard navigation must reveal clipped menu actions"
+    );
 }
 
 #[test]
@@ -582,13 +691,25 @@ fn ink_tin_keeps_color_picking_and_fits_after_resize() {
         assert!(app.tin_open);
     }
     frames.settle(app);
-    let tin = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("tin-rect"))).unwrap();
-    let strip = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("strip-rect"))).unwrap();
-    assert!(!tin.intersects(strip), "advanced colours must not cover the ink strip");
+    let tin = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
+        .unwrap();
+    let strip = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("strip-rect")))
+        .unwrap();
+    assert!(
+        !tin.intersects(strip),
+        "advanced colours must not cover the ink strip"
+    );
     frames.snapshot("ink-tin");
     frames.size = vec2(900.0, 500.0);
     frames.settle(app);
-    let tin = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("tin-rect"))).unwrap();
+    let tin = frames
+        .ctx
+        .data(|d| d.get_temp::<Rect>(Id::new("tin-rect")))
+        .unwrap();
     assert!(Rect::from_min_size(Pos2::ZERO, frames.size).contains_rect(tin));
     frames.snapshot("ink-tin-short");
     frames.key(app, Key::Escape);
@@ -601,17 +722,37 @@ fn ink_fields_use_continuous_meshes() {
     let ctx = Context::default();
     let output = ctx.run(RawInput::default(), |ctx| {
         let painter = ctx.layer_painter(LayerId::background());
-        paint_sv_field(&painter, Rect::from_min_size(Pos2::ZERO, vec2(204.0, 132.0)), 0.5);
-        paint_hue_bar(&painter, Rect::from_min_size(pos2(0.0, 144.0), vec2(204.0, 16.0)));
+        paint_sv_field(
+            &painter,
+            Rect::from_min_size(Pos2::ZERO, vec2(204.0, 132.0)),
+            0.5,
+        );
+        paint_hue_bar(
+            &painter,
+            Rect::from_min_size(pos2(0.0, 144.0), vec2(204.0, 16.0)),
+        );
     });
-    let meshes: Vec<_> = output.shapes.iter().filter_map(|shape| {
-        if let Shape::Mesh(mesh) = &shape.shape { Some(mesh) } else { None }
-    }).collect();
+    let meshes: Vec<_> = output
+        .shapes
+        .iter()
+        .filter_map(|shape| {
+            if let Shape::Mesh(mesh) = &shape.shape {
+                Some(mesh)
+            } else {
+                None
+            }
+        })
+        .collect();
     assert_eq!(meshes.len(), 2, "one continuous mesh per colour field");
-    for mesh in &meshes { assert!(mesh.is_valid()); }
+    for mesh in &meshes {
+        assert!(mesh.is_valid());
+    }
     assert_eq!(meshes[0].vertices.first().unwrap().color, Color32::WHITE);
     assert_eq!(meshes[0].vertices.last().unwrap().color, Color32::BLACK);
-    assert_eq!(meshes[1].vertices.first().unwrap().color, meshes[1].vertices.last().unwrap().color);
+    assert_eq!(
+        meshes[1].vertices.first().unwrap().color,
+        meshes[1].vertices.last().unwrap().color
+    );
 }
 
 #[test]
@@ -663,7 +804,10 @@ fn home_return_button_saves_and_accepts_mouse_touch_and_keyboard() {
             frames.snapshot("note-home-return");
         }
         frames.key(app, Key::Tab);
-        let focused = frames.ctx.memory(|m| m.focused()).expect("return button is keyboard reachable");
+        let focused = frames
+            .ctx
+            .memory(|m| m.focused())
+            .expect("return button is keyboard reachable");
         let button = frames.ctx.read_response(focused).unwrap().rect;
         assert!(button.min.x < 60.0 && button.max.y <= 52.0);
         assert_eq!(button.size(), vec2(44.0, 44.0));
@@ -693,14 +837,21 @@ fn colored_note_tools_preserve_ink_and_support_mouse_and_touch() {
     let paper = app.note.as_ref().unwrap().paper;
     let mut frames = Frames::new(app);
     let tool_center = |frames: &Frames, fill| {
-        frames.output.as_ref().unwrap().shapes.iter().find_map(|shape| {
-            if let Shape::Rect(rect) = &shape.shape {
-                if rect.fill == fill && (rect.rect.width() - 40.0).abs() < 0.1 {
-                    return Some(rect.rect.center());
+        frames
+            .output
+            .as_ref()
+            .unwrap()
+            .shapes
+            .iter()
+            .find_map(|shape| {
+                if let Shape::Rect(rect) = &shape.shape {
+                    if rect.fill == fill && (rect.rect.width() - 40.0).abs() < 0.1 {
+                        return Some(rect.rect.center());
+                    }
                 }
-            }
-            None
-        }).expect("coloured tool face is rendered")
+                None
+            })
+            .expect("coloured tool face is rendered")
     };
     for (edge, size, touch) in [
         (DockEdge::Bottom, vec2(1280.0, 860.0), false),
@@ -720,20 +871,39 @@ fn colored_note_tools_preserve_ink_and_support_mouse_and_touch() {
         frames.step(app, vec![Event::PointerMoved(Pos2::ZERO)]);
         frames.settle(app);
         assert_eq!(app.tool, Tool::Brush);
-        assert_eq!(app.ink, ink, "control pigments must not change the drawing ink");
+        assert_eq!(
+            app.ink, ink,
+            "control pigments must not change the drawing ink"
+        );
         assert_eq!(app.note.as_ref().unwrap().paper, paper);
         tool_center(&frames, app.tool_well_fill(Tool::Brush, true));
         app.palette_open = true;
         frames.settle(app);
-        let dock = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("dock-rect"))).unwrap();
+        let dock = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("dock-rect")))
+            .unwrap();
         assert!(Rect::from_min_size(Pos2::ZERO, size).contains_rect(dock));
-        let strip = frames.ctx.data(|d| d.get_temp::<Rect>(Id::new("strip-rect"))).unwrap();
+        let strip = frames
+            .ctx
+            .data(|d| d.get_temp::<Rect>(Id::new("strip-rect")))
+            .unwrap();
         assert!(Rect::from_min_size(Pos2::ZERO, size).contains_rect(strip));
         if touch {
-            assert!(strip.width() <= 60.0, "vertical palette must remain a narrow strip");
-            assert!(strip.max.x <= dock.min.x, "palette must not cover the tools");
+            assert!(
+                strip.width() <= 60.0,
+                "vertical palette must remain a narrow strip"
+            );
+            assert!(
+                strip.max.x <= dock.min.x,
+                "palette must not cover the tools"
+            );
         }
-        frames.snapshot(if touch { "note-colors-vertical" } else { "note-colors-horizontal" });
+        frames.snapshot(if touch {
+            "note-colors-vertical"
+        } else {
+            "note-colors-horizontal"
+        });
     }
     let original_case = app.note_case_color();
     app.note.as_mut().unwrap().cover = 3;
@@ -764,7 +934,9 @@ fn page_trash_selection_is_explicit_and_batch_undo_restores_pages() {
         frames.snapshot("note-toolbar-trash");
         app.start_page_delete();
         frames.settle(app);
-        let hit = app.unit_screen_rect(app.canvas_rect, 0, 0).intersect(app.canvas_rect);
+        let hit = app
+            .unit_screen_rect(app.canvas_rect, 0, 0)
+            .intersect(app.canvas_rect);
         if touch {
             frames.touch(app, TouchPhase::Start, hit.center());
             assert_eq!(app.note.as_ref().unwrap().pages.len(), 3);
@@ -788,7 +960,10 @@ fn page_trash_selection_is_explicit_and_batch_undo_restores_pages() {
         assert_eq!(app.note.as_ref().unwrap().pages.len(), 1);
         assert!(app.note.as_ref().unwrap().unit_occupied(2, 0));
         assert!(app.undo.undo(app.note.as_mut().unwrap()));
-        assert_eq!(serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(&app.note.as_ref().unwrap().pages).unwrap(),
+            before
+        );
     }
 }
 
@@ -890,7 +1065,7 @@ fn drawer_close_button_closes_without_deleting_and_can_reopen() {
     let mut fixture = Fixture::new();
     let id = fixture.notebook("Keep in trash");
     let app = &mut fixture.app;
-    app.lib.trash_note(id);
+    app.lib.trash_note(id).expect("trash notebook");
     app.shelf_trash = true;
     let mut frames = Frames::new(app);
     frames.settle(app);
@@ -951,18 +1126,11 @@ fn drawer_keyboard_close_respects_modal_priority_and_selected_notebooks() {
         if key == Key::Enter {
             for _ in 0..32 {
                 frames.key(app, Key::Tab);
-                if frames
-                    .ctx
-                    .memory(|m| m.has_focus(Id::new("close-trash")))
-                {
+                if frames.ctx.memory(|m| m.has_focus(Id::new("close-trash"))) {
                     break;
                 }
             }
-            assert!(
-                frames
-                    .ctx
-                    .memory(|m| m.has_focus(Id::new("close-trash")))
-            );
+            assert!(frames.ctx.memory(|m| m.has_focus(Id::new("close-trash"))));
         } else if key == Key::Space {
             frames
                 .ctx
@@ -1114,21 +1282,30 @@ fn linked_paper_layers_share_pixel_aligned_edges() {
     let app = &mut fixture.app;
     app.open_note(id);
     let note = app.note.as_mut().unwrap();
-    note.pages.extend([(1, 0), (0, 1), (1, 1)].map(|(x, y)| crate::document::Page::at(x, y)));
+    note.pages
+        .extend([(1, 0), (0, 1), (1, 1)].map(|(x, y)| crate::document::Page::at(x, y)));
     note.paper = PaperKind::Grid;
     let ctx = Context::default();
     let canvas = Rect::from_min_size(Pos2::ZERO, vec2(2400.0, 2400.0));
     for density in [1.0, 1.25, 2.0] {
         ctx.set_pixels_per_point(density);
         for zoom in [0.125, 0.333, 0.625] {
-            app.camera = Camera { pan: vec2(33.37, 47.19), zoom };
-            let output = ctx.run(RawInput {
-                screen_rect: Some(canvas),
-                ..Default::default()
-            }, |ctx| {
-                let painter = ctx.layer_painter(LayerId::background()).with_clip_rect(canvas);
-                app.paint_world(&painter, canvas);
-            });
+            app.camera = Camera {
+                pan: vec2(33.37, 47.19),
+                zoom,
+            };
+            let output = ctx.run(
+                RawInput {
+                    screen_rect: Some(canvas),
+                    ..Default::default()
+                },
+                |ctx| {
+                    let painter = ctx
+                        .layer_painter(LayerId::background())
+                        .with_clip_rect(canvas);
+                    app.paint_world(&painter, canvas);
+                },
+            );
             let mut surfaces = Vec::new();
             let mut started_grain = false;
             for shape in &output.shapes {
@@ -1137,7 +1314,10 @@ fn linked_paper_layers_share_pixel_aligned_edges() {
                         started_grain = true;
                         surfaces.push(shape.clip_rect);
                     } else if rect.fill == app.look.paper {
-                        assert!(!started_grain, "opaque paper must never cover grain or ruling");
+                        assert!(
+                            !started_grain,
+                            "opaque paper must never cover grain or ruling"
+                        );
                     }
                 }
             }
@@ -1146,9 +1326,15 @@ fn linked_paper_layers_share_pixel_aligned_edges() {
             assert_eq!(surfaces[0].max.y, surfaces[2].min.y);
             assert_eq!(surfaces[1].max.y, surfaces[3].min.y);
             assert_eq!(surfaces[2].max.x, surfaces[3].min.x);
-            for edge in surfaces.iter().flat_map(|r| [r.min.x, r.min.y, r.max.x, r.max.y]) {
+            for edge in surfaces
+                .iter()
+                .flat_map(|r| [r.min.x, r.min.y, r.max.x, r.max.y])
+            {
                 let pixel = edge * output.pixels_per_point;
-                assert!((pixel - pixel.round()).abs() < 0.001, "fractional scissor edge: {pixel}");
+                assert!(
+                    (pixel - pixel.round()).abs() < 0.001,
+                    "fractional scissor edge: {pixel}"
+                );
             }
         }
     }

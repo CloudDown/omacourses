@@ -134,8 +134,10 @@ fn draw_template(
     page_w: f32,
     page_h: f32,
 ) {
-    let mut paint = Paint::default();
-    paint.anti_alias = true;
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Paint::default()
+    };
     let mut stroke = SkStroke::default();
     match kind {
         PaperKind::Blank | PaperKind::Slate => {}
@@ -212,6 +214,7 @@ fn draw_template(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn line(
     pm: &mut Pixmap,
     x0: f32,
@@ -234,6 +237,7 @@ fn rgb(c: egui::Color32) -> Color {
     Color::from_rgba8(c.r(), c.g(), c.b(), 255)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn blit(pm: &mut Pixmap, x: f32, y: f32, dw: f32, dh: f32, iw: u32, ih: u32, rgba: &[u8]) {
     let Some(src) = Pixmap::from_vec(
         rgba.to_vec(),
@@ -253,6 +257,7 @@ fn blit(pm: &mut Pixmap, x: f32, y: f32, dw: f32, dh: f32, iw: u32, ih: u32, rgb
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_text(
     pm: &mut Pixmap,
     font: &Font,

@@ -52,7 +52,21 @@ Keep your notebooks on the shelf and restore any you have moved to the bin.
 curl -fsSL https://raw.githubusercontent.com/CloudDown/omacourses/main/install.sh | bash
 ```
 
-The installer checks the Arch build dependencies, asks before installing any that are missing, builds the latest version from source, and puts `cahier` in `~/.local/bin`. It also supports other Linux distributions if Rust/Cargo and the required graphics development libraries are already installed.
+The installer checks runtime libraries, including `fc-match` from fontconfig, asks before installing any that are missing, downloads the latest release binary, and puts `cahier` in `~/.local/bin`. It also installs a desktop entry and icon (`com.clouddown.cahier`) so Cahier appears in the application menu.
+
+Compile `main` from source instead:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CloudDown/omacourses/main/install.sh | bash -s -- --from-source
+```
+
+Remove the binary, desktop entry, and icon:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CloudDown/omacourses/main/install.sh | bash -s -- --uninstall
+```
+
+Other Linux distributions work when the graphics libraries are already installed. `--from-source` also needs Rust and Cargo.
 
 ```bash
 cargo run --release
@@ -67,6 +81,20 @@ CAHIER_OPEN=Mindset cahier   # open a notebook by title
 ```
 
 Theme read from `omarchy theme current` / `colors.toml`.
+
+### Hyprland
+
+Optional keybinding in `~/.config/hypr/hyprland.conf`:
+
+```ini
+bind = SUPER, N, exec, cahier
+```
+
+The window uses app id `com.clouddown.cahier`, the same value as `StartupWMClass` in the desktop file. Example window rule:
+
+```ini
+windowrule = float, class:^(com\.clouddown\.cahier)$
+```
 
 ## Gestures
 

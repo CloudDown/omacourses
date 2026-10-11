@@ -94,13 +94,13 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 860.0])
             .with_min_inner_size([320.0, 280.0])
-            .with_title("Notes")
+            .with_title("Cahier")
             .with_app_id("com.clouddown.cahier"),
         vsync: false,
         ..Default::default()
     };
     eframe::run_native(
-        "Notes",
+        "Cahier",
         options,
         Box::new(|cc| Ok(Box::new(CahierApp::new(cc)))),
     )

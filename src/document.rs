@@ -150,7 +150,7 @@ impl ImageObj {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Page {
     pub strokes: Vec<InkStroke>,
     pub texts: Vec<TextBox>,
@@ -159,18 +159,6 @@ pub struct Page {
     pub col: i32,
     #[serde(default)]
     pub row: i32,
-}
-
-impl Default for Page {
-    fn default() -> Self {
-        Self {
-            strokes: Vec::new(),
-            texts: Vec::new(),
-            images: Vec::new(),
-            col: 0,
-            row: 0,
-        }
-    }
 }
 
 impl Page {
@@ -254,7 +242,7 @@ impl Note {
 
     pub fn unit_occupied(&self, col: i32, row: i32) -> bool {
         if self.is_grown_single() {
-            self.unit_cells().iter().any(|&c| c == (col, row))
+            self.unit_cells().contains(&(col, row))
         } else {
             self.cell_taken(col, row)
         }
@@ -277,7 +265,8 @@ impl Note {
 
     /// One tab per empty destination. Shared holes (diagonal neighbors) get a center tab.
     pub fn unit_tabs(&self) -> Vec<UnitTab> {
-        let mut by_dest: BTreeMap<(i32, i32), Vec<(i32, i32, i32, i32)>> = BTreeMap::new();
+        type Edge = (i32, i32, i32, i32);
+        let mut by_dest: BTreeMap<(i32, i32), Vec<Edge>> = BTreeMap::new();
         for (col, row, dcol, drow) in self.free_unit_edges() {
             by_dest
                 .entry((col + dcol, row + drow))
@@ -497,10 +486,14 @@ fn split_stroke_across_tiles(stroke: &InkStroke, tw: f32, th: f32) -> Vec<(i32, 
         hits.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-5);
         for (_, p) in hits {
             cur.points.push(p);
-            out.push((cur_cell.0, cur_cell.1, std::mem::replace(
-                &mut cur,
-                InkStroke::new(stroke.nib, stroke.color32(), stroke.width),
-            )));
+            out.push((
+                cur_cell.0,
+                cur_cell.1,
+                std::mem::replace(
+                    &mut cur,
+                    InkStroke::new(stroke.nib, stroke.color32(), stroke.width),
+                ),
+            ));
             cur.points.push(p);
             cur_cell = cell(p);
         }
@@ -693,11 +686,7 @@ mod tests {
         assert_eq!(n.pages.len(), 4);
         assert_eq!(n.page_w, PAGE_W);
         assert_eq!(n.page_h, PAGE_H);
-        let p = n
-            .pages
-            .iter()
-            .find(|p| p.col == 1 && p.row == 1)
-            .unwrap();
+        let p = n.pages.iter().find(|p| p.col == 1 && p.row == 1).unwrap();
         let pt = &p.strokes[0].points[0];
         assert!((pt.x - 5.0).abs() < 0.05);
         assert!((pt.y - 6.0).abs() < 0.05);

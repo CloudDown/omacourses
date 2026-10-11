@@ -1,17 +1,9 @@
 use crate::document::Note;
 
+#[derive(Default)]
 pub struct UndoStack {
     past: Vec<Note>,
     future: Vec<Note>,
-}
-
-impl Default for UndoStack {
-    fn default() -> Self {
-        Self {
-            past: Vec::new(),
-            future: Vec::new(),
-        }
-    }
 }
 
 impl UndoStack {

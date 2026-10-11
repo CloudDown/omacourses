@@ -1,5 +1,6 @@
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::document::Note;
@@ -95,13 +96,96 @@ impl Default for Index {
     }
 }
 
+/// A notebook or shelf file could not be written.
+#[derive(Debug)]
+pub enum SaveError {
+    Io { path: PathBuf, source: io::Error },
+    Encode(serde_json::Error),
+}
+
+impl SaveError {
+    fn io(path: impl Into<PathBuf>, source: io::Error) -> Self {
+        Self::Io {
+            path: path.into(),
+            source,
+        }
+    }
+}
+
+impl std::fmt::Display for SaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io { path, source } => {
+                write!(f, "could not write {}: {source}", path.display())
+            }
+            Self::Encode(err) => write!(f, "could not encode the notebook: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for SaveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Encode(err) => Some(err),
+        }
+    }
+}
+
+/// Write `bytes` by creating a temp file in the same directory, fsyncing it, then renaming.
+/// A failed write leaves the previous file in place.
+fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let tmp_path = parent.join(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        std::process::id()
+    ));
+    let write_tmp = (|| {
+        let mut file = File::options()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(err) = write_tmp {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct Library {
     pub root: PathBuf,
     pub index: Index,
+    pending_save_error: Option<String>,
 }
 
 impl Library {
+    /// Empty library rooted at `root`, without reading or creating files.
+    #[cfg(test)]
+    pub fn fresh(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            index: Index::default(),
+            pending_save_error: None,
+        }
+    }
+
     pub fn open() -> Self {
         let root = data_dir();
         let _ = fs::create_dir_all(root.join("notes"));
@@ -110,17 +194,32 @@ impl Library {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        let mut lib = Self { root, index };
+        let mut lib = Self {
+            root,
+            index,
+            pending_save_error: None,
+        };
         lib.ensure_slots();
         lib.ensure_trash_slots();
         lib
     }
 
-    pub fn save_index(&self) {
-        let _ = fs::create_dir_all(&self.root);
-        if let Ok(s) = serde_json::to_string_pretty(&self.index) {
-            let _ = fs::write(self.root.join("library.json"), s);
+    /// Startup repair can fail before the window exists. The app shows this once.
+    pub fn take_save_error(&mut self) -> Option<String> {
+        self.pending_save_error.take()
+    }
+
+    pub(crate) fn remember_save_error(&mut self, result: Result<(), SaveError>) {
+        if let Err(err) = result {
+            self.pending_save_error = Some(err.to_string());
         }
+    }
+
+    pub fn save_index(&self) -> Result<(), SaveError> {
+        fs::create_dir_all(&self.root).map_err(|source| SaveError::io(&self.root, source))?;
+        let path = self.root.join("library.json");
+        let bytes = serde_json::to_vec_pretty(&self.index).map_err(SaveError::Encode)?;
+        atomic_write(&path, &bytes).map_err(|source| SaveError::io(path, source))
     }
 
     pub fn note_dir(&self, id: Uuid) -> PathBuf {
@@ -135,12 +234,13 @@ impl Library {
         Some(note)
     }
 
-    pub fn save_note(&mut self, note: &Note) {
+    pub fn save_note(&mut self, note: &Note) -> Result<(), SaveError> {
         let dir = self.note_dir(note.id);
-        let _ = fs::create_dir_all(dir.join("media"));
-        if let Ok(s) = serde_json::to_string(&note) {
-            let _ = fs::write(dir.join("note.json"), s);
-        }
+        let media = dir.join("media");
+        fs::create_dir_all(&media).map_err(|source| SaveError::io(&media, source))?;
+        let path = dir.join("note.json");
+        let bytes = serde_json::to_vec(note).map_err(SaveError::Encode)?;
+        atomic_write(&path, &bytes).map_err(|source| SaveError::io(&path, source))?;
         if let Some(meta) = self.index.notes.iter_mut().find(|m| m.id == note.id) {
             meta.title = note.title.clone();
             meta.updated = note.updated;
@@ -162,7 +262,7 @@ impl Library {
                 },
             );
         }
-        self.save_index();
+        self.save_index()
     }
 
     fn first_free_slot(&self) -> u32 {
@@ -213,7 +313,8 @@ impl Library {
             }
         }
         if dirty {
-            self.save_index();
+            let saved = self.save_index();
+            self.remember_save_error(saved);
         }
     }
 
@@ -246,7 +347,8 @@ impl Library {
             }
         }
         if dirty {
-            self.save_index();
+            let saved = self.save_index();
+            self.remember_save_error(saved);
         }
     }
 
@@ -267,13 +369,14 @@ impl Library {
             n.slot = remap(n.slot);
         }
         self.index.shelf_cols = SHELF_COLS;
-        self.save_index();
+        let saved = self.save_index();
+        self.remember_save_error(saved);
     }
 
     /// Places notebooks on cells `dest`, `dest+1`, … (swap if occupied).
-    pub fn place_at(&mut self, moving: &[Uuid], dest: u32) {
+    pub fn place_at(&mut self, moving: &[Uuid], dest: u32) -> Result<(), SaveError> {
         if moving.is_empty() {
-            return;
+            return Ok(());
         }
         let dest = dest.min(SHELF_SLOTS.saturating_sub(1));
         let old: Vec<u32> = moving
@@ -304,13 +407,13 @@ impl Library {
                 n.slot = target;
             }
         }
-        self.save_index();
+        self.save_index()
     }
 
     /// Places notebooks on bin cells `dest`, `dest+1`, … (swap if occupied).
-    pub fn place_trash_at(&mut self, moving: &[Uuid], dest: u32) {
+    pub fn place_trash_at(&mut self, moving: &[Uuid], dest: u32) -> Result<(), SaveError> {
         if moving.is_empty() {
-            return;
+            return Ok(());
         }
         let dest = dest.min(TRASH_SLOTS.saturating_sub(1));
         let old: Vec<u32> = moving
@@ -341,50 +444,52 @@ impl Library {
                 n.slot = target;
             }
         }
-        self.save_index();
+        self.save_index()
     }
 
-    pub fn restore_at(&mut self, moving: &[Uuid], dest: u32) {
+    pub fn restore_at(&mut self, moving: &[Uuid], dest: u32) -> Result<(), SaveError> {
         for id in moving {
-            self.restore_note(*id);
+            self.restore_note(*id)?;
         }
-        self.place_at(moving, dest);
+        self.place_at(moving, dest)
     }
 
-    pub fn trash_at(&mut self, moving: &[Uuid], dest: u32) {
+    pub fn trash_at(&mut self, moving: &[Uuid], dest: u32) -> Result<(), SaveError> {
         for id in moving {
-            self.trash_note(*id);
+            self.trash_note(*id)?;
         }
-        self.place_trash_at(moving, dest);
+        self.place_trash_at(moving, dest)
     }
 
-    pub fn bring_front(&mut self, id: Uuid) {
+    pub fn bring_front(&mut self, id: Uuid) -> Result<(), SaveError> {
         if let Some(i) = self.index.notes.iter().position(|m| m.id == id) {
             if i == 0 {
-                return;
+                return Ok(());
             }
             let m = self.index.notes.remove(i);
             self.index.notes.insert(0, m);
-            self.save_index();
+            self.save_index()?;
         }
+        Ok(())
     }
 
-    pub fn insert_new(&mut self, note: &Note) {
-        self.save_note(note);
+    pub fn insert_new(&mut self, note: &Note) -> Result<(), SaveError> {
+        self.save_note(note)
     }
 
     /// Moves the notebook into the trash (files kept).
-    pub fn trash_note(&mut self, id: Uuid) {
+    pub fn trash_note(&mut self, id: Uuid) -> Result<(), SaveError> {
         if let Some(i) = self.index.notes.iter().position(|m| m.id == id) {
             let mut meta = self.index.notes.remove(i);
             self.index.trash.retain(|m| m.id != id);
             meta.slot = self.first_free_trash_slot();
             self.index.trash.push(meta);
-            self.save_index();
+            self.save_index()?;
         }
+        Ok(())
     }
 
-    pub fn restore_note(&mut self, id: Uuid) {
+    pub fn restore_note(&mut self, id: Uuid) -> Result<(), SaveError> {
         if let Some(i) = self.index.trash.iter().position(|m| m.id == id) {
             let meta = self.index.trash.remove(i);
             self.index.notes.retain(|m| m.id != id);
@@ -394,23 +499,30 @@ impl Library {
                 meta.slot = self.first_free_slot();
             }
             self.index.notes.push(meta);
-            self.save_index();
+            self.save_index()?;
         }
+        Ok(())
     }
 
-    pub fn purge_trashed(&mut self, id: Uuid) {
+    pub fn purge_trashed(&mut self, id: Uuid) -> Result<(), SaveError> {
         self.index.trash.retain(|m| m.id != id);
-        let _ = fs::remove_dir_all(self.note_dir(id));
-        self.save_index();
+        let dir = self.note_dir(id);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).map_err(|source| SaveError::io(&dir, source))?;
+        }
+        self.save_index()
     }
 
-    pub fn empty_trash(&mut self) {
+    pub fn empty_trash(&mut self) -> Result<(), SaveError> {
         let ids: Vec<_> = self.index.trash.iter().map(|m| m.id).collect();
         self.index.trash.clear();
         for id in ids {
-            let _ = fs::remove_dir_all(self.note_dir(id));
+            let dir = self.note_dir(id);
+            if dir.exists() {
+                fs::remove_dir_all(&dir).map_err(|source| SaveError::io(&dir, source))?;
+            }
         }
-        self.save_index();
+        self.save_index()
     }
 
     pub fn write_media(&self, note_id: Uuid, bytes: &[u8]) -> Option<String> {
@@ -426,9 +538,9 @@ impl Library {
         self.note_dir(note_id).join("media").join(file)
     }
 
-    pub fn mark_seeded(&mut self) {
+    pub fn mark_seeded(&mut self) -> Result<(), SaveError> {
         self.index.seeded = true;
-        self.save_index();
+        self.save_index()
     }
 }
 
@@ -470,6 +582,7 @@ pub fn image_size(path: &Path) -> Option<(f32, f32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn remap_5_to_10_keeps_rows() {
@@ -481,5 +594,98 @@ mod tests {
         assert_eq!(remap(9), 14);
         assert_eq!(remap(10), 20);
         assert_eq!(remap(14), 24);
+    }
+
+    #[test]
+    fn atomic_save_roundtrip_replaces_the_file_and_leaves_no_temp() {
+        let root = std::env::temp_dir().join(format!("cahier-atomic-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&root);
+        let mut lib = Library::fresh(&root);
+        let note = crate::document::Note::blank("Atomic", 1);
+        lib.save_note(&note).expect("save note");
+        let loaded = lib.load_note(note.id).expect("load note");
+        assert_eq!(loaded.title, "Atomic");
+        assert!(root.join("library.json").is_file());
+        assert!(lib.note_dir(note.id).join("note.json").is_file());
+
+        let mut rewritten = loaded;
+        rewritten.title = "Rewritten".into();
+        lib.save_note(&rewritten).expect("rewrite note");
+        let text = fs::read_to_string(lib.note_dir(note.id).join("note.json")).expect("read note");
+        assert!(text.contains("Rewritten"));
+        assert!(!text.contains("Atomic"));
+        assert!(
+            !dir_has_tmp(&root),
+            "temp file left behind after a successful save"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn atomic_write_failure_keeps_the_previous_file() {
+        let root = std::env::temp_dir().join(format!("cahier-atomic-ro-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create root");
+        let path = root.join("library.json");
+        atomic_write(&path, br#"{"kept":true}"#).expect("first write");
+
+        let original = fs::metadata(&root).expect("metadata").permissions().mode();
+        let mut locked = fs::metadata(&root).expect("metadata").permissions();
+        locked.set_mode(original & !0o222);
+        fs::set_permissions(&root, locked).expect("lock directory");
+        let _unlock = UnlockDir(&root, original);
+
+        let err =
+            atomic_write(&path, br#"{"kept":false}"#).expect_err("write into a locked directory");
+        assert!(!err.to_string().is_empty());
+        assert_eq!(fs::read(&path).expect("read original"), br#"{"kept":true}"#);
+        drop(_unlock);
+        assert!(!dir_has_tmp(&root));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn save_index_reports_a_directory_that_cannot_be_created() {
+        let root = std::env::temp_dir().join(format!("cahier-atomic-file-{}", Uuid::new_v4()));
+        let _ = fs::remove_file(&root);
+        fs::write(&root, b"not a directory").expect("blocker file");
+        let lib = Library::fresh(&root);
+        let err = lib.save_index().expect_err("root is a file");
+        let message = err.to_string();
+        assert!(message.contains("could not write"), "{message}");
+        assert_eq!(fs::read(&root).expect("blocker intact"), b"not a directory");
+        let _ = fs::remove_file(&root);
+    }
+
+    fn dir_has_tmp(root: &Path) -> bool {
+        fn walk(dir: &Path, found: &mut bool) {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+            for ent in entries.filter_map(Result::ok) {
+                let path = ent.path();
+                if ent.file_name().to_string_lossy().contains(".tmp") {
+                    *found = true;
+                }
+                if path.is_dir() {
+                    walk(&path, found);
+                }
+            }
+        }
+        let mut found = false;
+        walk(root, &mut found);
+        found
+    }
+
+    struct UnlockDir<'a>(&'a Path, u32);
+
+    impl Drop for UnlockDir<'_> {
+        fn drop(&mut self) {
+            if let Ok(meta) = fs::metadata(self.0) {
+                let mut perms = meta.permissions();
+                perms.set_mode(self.1);
+                let _ = fs::set_permissions(self.0, perms);
+            }
+        }
     }
 }
