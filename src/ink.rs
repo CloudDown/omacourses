@@ -59,7 +59,6 @@ impl Tool {
             Tool::Image => "Image",
         }
     }
-
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -160,14 +159,10 @@ impl InkStroke {
 
     pub fn tessellate(&mut self) -> &Mesh {
         if self.mesh.is_none() {
-            self.mesh = Some(ribbon_mesh(
-                &self.points,
-                self.width,
-                self.nib,
-                self.color32(),
-            ));
+            let mesh = ribbon_mesh(&self.points, self.width, self.nib, self.color32());
+            self.mesh = Some(mesh);
         }
-        self.mesh.as_ref().unwrap()
+        self.mesh.as_ref().expect("ribbon mesh was stored above")
     }
 }
 
@@ -222,18 +217,25 @@ pub fn ribbon_mesh(points: &[InkPoint], width: f32, nib: Nib, color: Color32) ->
         right.push(pt.pos() - n * r);
     }
 
+    let Some(first) = points.first() else {
+        return mesh;
+    };
+    let Some(last) = points.last() else {
+        return mesh;
+    };
+    let Some(left_first) = left.first() else {
+        return mesh;
+    };
+    let Some(left_last) = left.last() else {
+        return mesh;
+    };
     add_disc(
         &mut mesh,
-        points[0].pos(),
-        dist(points[0].pos(), left[0]),
+        first.pos(),
+        dist(first.pos(), *left_first),
         color,
     );
-    add_disc(
-        &mut mesh,
-        points.last().unwrap().pos(),
-        dist(points.last().unwrap().pos(), *left.last().unwrap()),
-        color,
-    );
+    add_disc(&mut mesh, last.pos(), dist(last.pos(), *left_last), color);
 
     for i in 0..points.len() - 1 {
         add_tri(&mut mesh, left[i], right[i], left[i + 1], color);
@@ -423,8 +425,12 @@ fn best_closed_shape(stroke: &InkStroke) -> Option<InkStroke> {
 }
 
 fn stroke_closed(stroke: &InkStroke) -> bool {
-    let start = stroke.points[0].pos();
-    let end = stroke.points.last().unwrap().pos();
+    let Some(start) = stroke.points.first().map(|p| p.pos()) else {
+        return false;
+    };
+    let Some(end) = stroke.points.last().map(|p| p.pos()) else {
+        return false;
+    };
     let gap = start.distance(end);
     let path: f32 = stroke
         .points
@@ -434,17 +440,18 @@ fn stroke_closed(stroke: &InkStroke) -> bool {
     if path < 40.0 {
         return false;
     }
-    let diag = stroke
-        .bbox()
-        .map(|(a, b)| a.distance(b))
-        .unwrap_or(path);
+    let diag = stroke.bbox().map(|(a, b)| a.distance(b)).unwrap_or(path);
     // Approximate closure: a real gap at the end of the stroke is allowed.
     gap < (path * 0.38).min(diag * 0.42).max(56.0) || (gap < 90.0 && path > 70.0)
 }
 
 fn line_fits(stroke: &InkStroke) -> bool {
-    let a = stroke.points[0].pos();
-    let b = stroke.points.last().unwrap().pos();
+    let Some(a) = stroke.points.first().map(|p| p.pos()) else {
+        return false;
+    };
+    let Some(b) = stroke.points.last().map(|p| p.pos()) else {
+        return false;
+    };
     let len = a.distance(b);
     if len < 28.0 {
         return false;
@@ -454,8 +461,11 @@ fn line_fits(stroke: &InkStroke) -> bool {
 }
 
 fn line_stroke(stroke: &InkStroke) -> InkStroke {
-    let a = stroke.points[0];
-    let b = *stroke.points.last().unwrap();
+    let (Some(&a), Some(&b)) = (stroke.points.first(), stroke.points.last()) else {
+        let mut empty = stroke.clone();
+        empty.mesh = None;
+        return empty;
+    };
     let mut s = stroke.clone();
     s.id = Uuid::new_v4();
     s.points = vec![
@@ -471,8 +481,12 @@ fn line_stroke(stroke: &InkStroke) -> InkStroke {
 }
 
 fn line_error(stroke: &InkStroke) -> f32 {
-    let a = stroke.points[0].pos();
-    let b = stroke.points.last().unwrap().pos();
+    let Some(a) = stroke.points.first().map(|p| p.pos()) else {
+        return f32::MAX;
+    };
+    let Some(b) = stroke.points.last().map(|p| p.pos()) else {
+        return f32::MAX;
+    };
     let mut e = 0.0f32;
     for p in &stroke.points {
         e = e.max(dist2_seg(p.pos(), a, b).sqrt());
@@ -770,15 +784,11 @@ fn fit_arrow(stroke: &InkStroke) -> Option<InkStroke> {
         return None;
     }
     let start = stroke.points[0].pos();
-    let tip = stroke
-        .points
-        .iter()
-        .map(|p| p.pos())
-        .max_by(|a, b| {
-            a.distance(start)
-                .partial_cmp(&b.distance(start))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })?;
+    let tip = stroke.points.iter().map(|p| p.pos()).max_by(|a, b| {
+        a.distance(start)
+            .partial_cmp(&b.distance(start))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })?;
     let shaft = tip - start;
     let len = shaft.length();
     if len < 56.0 {
@@ -882,5 +892,43 @@ pub fn default_width(nib: Nib) -> f32 {
         Nib::Brush => 6.5,
         Nib::Pencil => 3.4,
         Nib::Highlighter => 16.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::pos2;
+
+    #[test]
+    fn empty_stroke_does_not_panic() {
+        let mesh = ribbon_mesh(&[], 2.2, Nib::Fineliner, Color32::BLACK);
+        assert!(mesh.vertices.is_empty());
+
+        let mut stroke = InkStroke::new(Nib::Brush, Color32::BLACK, 4.0);
+        assert!(stroke.points.is_empty());
+        assert!(maybe_snap_shape(&stroke).is_none());
+        assert!(!stroke_closed(&stroke));
+        assert!(!line_fits(&stroke));
+        assert!(line_error(&stroke).is_infinite() || line_error(&stroke) == f32::MAX);
+        assert!(line_stroke(&stroke).points.is_empty());
+        assert!(stroke.tessellate().vertices.is_empty());
+
+        stroke.push(InkPoint::new(pos2(1.0, 1.0), 0.8));
+        assert!(maybe_snap_shape(&stroke).is_none());
+        let _ = stroke.tessellate();
+        assert!(!stroke_closed(&stroke));
+        assert!(!line_fits(&stroke));
+    }
+
+    #[test]
+    fn two_point_ribbon_has_geometry() {
+        let points = [
+            InkPoint::new(pos2(0.0, 0.0), 1.0),
+            InkPoint::new(pos2(40.0, 0.0), 1.0),
+        ];
+        let mesh = ribbon_mesh(&points, 3.0, Nib::Fineliner, Color32::BLACK);
+        assert!(!mesh.vertices.is_empty());
+        assert!(!mesh.indices.is_empty());
     }
 }

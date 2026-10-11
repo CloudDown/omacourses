@@ -6,7 +6,8 @@ use egui::{Color32, Pos2, Vec2};
 pub fn seed_if_needed(lib: &mut Library) {
     if lib.index.seeded || !lib.index.notes.is_empty() {
         if !lib.index.seeded {
-            lib.mark_seeded();
+            let saved = lib.mark_seeded();
+            lib.remember_save_error(saved);
         }
         return;
     }
@@ -14,10 +15,12 @@ pub fn seed_if_needed(lib: &mut Library) {
     let mentalite = note_mentalite();
     let da = note_direction();
     let brouillon = Note::blank("Draft", 2);
-    lib.insert_new(&mentalite);
-    lib.insert_new(&da);
-    lib.insert_new(&brouillon);
-    lib.mark_seeded();
+    for note in [&mentalite, &da, &brouillon] {
+        let saved = lib.insert_new(note);
+        lib.remember_save_error(saved);
+    }
+    let saved = lib.mark_seeded();
+    lib.remember_save_error(saved);
 }
 
 /// Mindset = a sketch of the lectern. Almost entirely ink.
@@ -158,12 +161,8 @@ fn note_mentalite() -> Note {
         .strokes
         .push(vline(900.0, 478.0, 154.0, mute, 1.5));
     for y in [510.0, 540.0, 570.0, 600.0] {
-        n.pages[0]
-            .strokes
-            .push(hline(795.0, y, 95.0, mute, 1.1));
-        n.pages[0]
-            .strokes
-            .push(hline(910.0, y, 95.0, mute, 1.1));
+        n.pages[0].strokes.push(hline(795.0, y, 95.0, mute, 1.1));
+        n.pages[0].strokes.push(hline(910.0, y, 95.0, mute, 1.1));
     }
     for i in 0..5 {
         let y = 490.0 + i as f32 * 30.0;

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Cahier
+Comment=Stylus notes on an Omarchy lectern
+Exec=cahier
+Icon=com.clouddown.cahier
+Terminal=false
+Categories=Office;Education;
+StartupWMClass=com.clouddown.cahier
